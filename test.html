@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>fwmp — terminal demo</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #06080a;
+    color: #3ef07c;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  .term {
+    max-width: 960px;
+    margin: 24px auto;
+    background: #0a0e0a;
+    border: 1px solid #1c3a26;
+    border-radius: 8px;
+    padding: 16px 20px;
+  }
+  .titlebar {
+    display: flex;
+    justify-content: space-between;
+    color: #2a6b45;
+    border-bottom: 1px solid #1c3a26;
+    padding-bottom: 8px;
+    margin-bottom: 10px;
+  }
+  .cur { animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+  .cols {
+    display: grid;
+    grid-template-columns: 160px 260px 1fr;
+    gap: 0;
+    min-height: 320px;
+  }
+  .col { padding: 0 14px; }
+  .col:first-child { padding-left: 0; }
+  .col:not(:last-child) { border-right: 1px solid #1c3a26; }
+  .hd { color: #2a6b45; margin-bottom: 6px; }
+  .row {
+    padding: 3px 4px;
+    color: #2a6b45;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .row.active { color: #eaff9c; background: #12271a; }
+  .state { float: right; }
+  .state.estb { color: #3ef07c; }
+  .state.twait { color: #e0a94c; }
+  pre { margin: 4px 0 0; white-space: pre-wrap; color: #2a6b45; line-height: 1.6; }
+  pre .val { color: #eaff9c; }
+  pre .estb { color: #3ef07c; }
+  .footer {
+    color: #2a6b45;
+    border-top: 1px solid #1c3a26;
+    margin-top: 12px;
+    padding-top: 8px;
+  }
+  .footer b { color: #3ef07c; }
+</style>
+</head>
+<body>
+
+<div class="term">
+  <div class="titlebar">
+    <span>fwmp v0.1 — clay/gui</span>
+    <span>pid watch: active <span class="cur">_</span></span>
+  </div>
+
+  <div class="cols">
+    <div class="col">
+      <div class="hd">┌─ apps ──────</div>
+      <div id="app-list"></div>
+    </div>
+    <div class="col">
+      <div class="hd" id="sock-hd">┌─ sockets ──────</div>
+      <div id="sock-list"></div>
+    </div>
+    <div class="col">
+      <div class="hd">┌─ inspect ──────</div>
+      <pre id="inspect"></pre>
+    </div>
+  </div>
+
+  <div class="footer">
+    <b>&uarr;&darr;</b> apps &nbsp; <b>tab</b> sockets &nbsp; <b>enter</b> inspect &nbsp; <b>r</b> reroll &nbsp; <b>/</b> filter
+  </div>
+</div>
+
+<script>
+const APPS = ["zen", "sshd", "discord", "syncthing", "spotify"];
+const DOMAINS = ["github.com","api.anthropic.com","cloudflare.com","google.com","fastly.net","discord.com","spotify.com","akamai.net","cdn.jsdelivr.net"];
+const STATES = ["ESTABLISHED","ESTABLISHED","ESTABLISHED","TIME_WAIT"];
+
+function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+function randIp(){ return `${randInt(20,220)}.${randInt(0,255)}.${randInt(0,255)}.${randInt(1,254)}`; }
+function randHex(n){ let s=""; for(let i=0;i<n;i++) s+="0123456789abcdef"[randInt(0,15)]; return s; }
+
+function genSockets(){
+  const n = randInt(3,6);
+  const out = [];
+  for (let i=0;i<n;i++){
+    const domain = DOMAINS[randInt(0,DOMAINS.length-1)];
+    out.push({
+      ip: randIp(),
+      port: 443,
+      state: STATES[randInt(0,STATES.length-1)],
+      domain, cname: domain,
+      resolver: ["1.1.1.1","8.8.8.8","9.9.9.9"][randInt(0,2)],
+      proto: Math.random() > 0.15 ? "TCP / TLS1.3" : "UDP / QUIC",
+      localPort: randInt(30000,65000),
+      pid: randInt(1000,60000),
+      sent: randInt(1,900)+"KB",
+      recv: randInt(1,4000)+"KB",
+      cert: randHex(12)+"...",
+    });
+  }
+  return out;
+}
+
+let cache = {};
+function socketsFor(app){
+  if (!cache[app]) cache[app] = genSockets();
+  return cache[app];
+}
+
+let appIdx = 0;
+let sockIdx = 0;
+let focus = "apps"; // apps | sockets
+
+function render(){
+  const app = APPS[appIdx];
+  const socks = socketsFor(app);
+  if (sockIdx >= socks.length) sockIdx = 0;
+
+  document.getElementById("app-list").innerHTML = APPS.map((a,i) =>
+    `<div class="row ${i===appIdx && focus==='apps' ? 'active' : ''}">${i===appIdx?'▸ ':'  '}${a}</div>`
+  ).join("");
+
+  document.getElementById("sock-hd").textContent = `┌─ sockets [${app}] ──────`;
+  document.getElementById("sock-list").innerHTML = socks.map((s,i) => {
+    const stateCls = s.state === "ESTABLISHED" ? "estb" : "twait";
+    const stateShort = s.state === "ESTABLISHED" ? "ESTB" : "TWAIT";
+    const active = i===sockIdx && focus==='sockets';
+    return `<div class="row ${active?'active':''}">${i===sockIdx?'▸ ':'  '}${s.ip}:${s.port} <span class="state ${stateCls}">${stateShort}</span></div>`;
+  }).join("");
+
+  const s = socks[sockIdx];
+  document.getElementById("inspect").innerHTML = s ? `remote     <span class="val">${s.ip}:${s.port}</span>
+host       <span class="val">${s.domain}</span>
+cname      ${s.cname}
+resolver   ${s.resolver} (dns)
+proto      ${s.proto}
+local_port ${s.localPort}
+pid        ${s.pid}
+sent       ${s.sent}
+recv       ${s.recv}
+state      [<span class="${s.state==='ESTABLISHED'?'estb':'val'}">${s.state}</span>]
+cert       ${s.cert}` : "no sockets";
+}
+
+document.addEventListener("keydown", (e) => {
+  const socks = socketsFor(APPS[appIdx]);
+  if (e.key === "ArrowDown") {
+    if (focus === "apps") { appIdx = Math.min(appIdx+1, APPS.length-1); sockIdx = 0; }
+    else { sockIdx = Math.min(sockIdx+1, socks.length-1); }
+    e.preventDefault();
+  } else if (e.key === "ArrowUp") {
+    if (focus === "apps") { appIdx = Math.max(appIdx-1, 0); sockIdx = 0; }
+    else { sockIdx = Math.max(sockIdx-1, 0); }
+    e.preventDefault();
+  } else if (e.key === "Tab") {
+    focus = focus === "apps" ? "sockets" : "apps";
+    e.preventDefault();
+  } else if (e.key === "r") {
+    cache = {};
+  }
+  render();
+});
+
+// click support too
+document.getElementById("app-list").addEventListener("click", (e) => {
+  const rows = [...document.getElementById("app-list").children];
+  const i = rows.indexOf(e.target.closest(".row"));
+  if (i >= 0) { appIdx = i; sockIdx = 0; focus = "apps"; render(); }
+});
+document.getElementById("sock-list").addEventListener("click", (e) => {
+  const rows = [...document.getElementById("sock-list").children];
+  const i = rows.indexOf(e.target.closest(".row"));
+  if (i >= 0) { sockIdx = i; focus = "sockets"; render(); }
+});
+
+render();
+</script>
+</body>
+</html>
