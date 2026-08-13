@@ -5,12 +5,22 @@
 #include "vmlinux.h"
 
 #include <bpf/bpf_core_read.h>
+
 #include <bpf/bpf_endian.h>
+
 #include <bpf/bpf_helpers.h>
+
 #include <bpf/bpf_tracing.h>
 
 const ushort AF_INET = 2;
 const ushort AF_INET6 = 10;
+
+enum event_type {
+  CONNECT,
+  ACCEPT,
+  BIND,
+  LISTEN,
+};
 
 struct event {
   __u32 pid;
@@ -26,6 +36,8 @@ struct event {
   __u8 remote_addr[16];
 
   __u64 timestamp_ns;
+  enum event_type type;
+  __u64 sock_cookie;
 };
 
 struct {
@@ -65,6 +77,9 @@ int BPF_PROG(tcp_v4_connect_exit, struct sock *sk, struct sockaddr *uaddr,
 
   event->remote_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
 
+  event->type = CONNECT;
+
+  event->sock_cookie = bpf_get_socket_cookie(sk);
   bpf_ringbuf_submit(event, 0);
 
   return 0;
@@ -103,57 +118,49 @@ int BPF_PROG(tcp_v6_connect_exit, struct sock *sk, struct sockaddr *uaddr,
   event->local_port = BPF_CORE_READ(sk, __sk_common.skc_num);
   event->remote_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
 
+  event->type = CONNECT;
+
+  event->sock_cookie = bpf_get_socket_cookie(sk);
+
   bpf_ringbuf_submit(event, 0);
 
   return 0;
 }
 
-SEC("kretprobe/inet_csk_accept")
-int BPF_KRETPROBE(inet_csk_accept, struct sock *retval) {
+SEC("fexit/inet_csk_accept")
+int BPF_PROG(inet_csk_accept, struct sock *sk, struct proto_accept_arg *arg,
+             struct sock *retval) {
   if (!retval)
     return 0;
-
   struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
-
   if (!event)
     return 0;
-
   __u64 pid_tgid = bpf_get_current_pid_tgid();
-
   event->pid = pid_tgid >> 32;
   event->tid = (__u32)pid_tgid;
   event->timestamp_ns = bpf_ktime_get_ns();
-
   __u16 family = BPF_CORE_READ(retval, __sk_common.skc_family);
-
   event->family = (__u8)family;
   event->protocol = IPPROTO_TCP;
-
   if (family == AF_INET) {
     __u32 local_addr = BPF_CORE_READ(retval, __sk_common.skc_rcv_saddr);
-
     __u32 remote_addr = BPF_CORE_READ(retval, __sk_common.skc_daddr);
-
     __builtin_memcpy(event->local_addr, &local_addr, sizeof(local_addr));
-
     __builtin_memcpy(event->remote_addr, &remote_addr, sizeof(remote_addr));
   } else if (family == AF_INET6) {
     BPF_CORE_READ_INTO(event->local_addr, retval,
                        __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8);
-
     BPF_CORE_READ_INTO(event->remote_addr, retval,
                        __sk_common.skc_v6_daddr.in6_u.u6_addr8);
   } else {
     bpf_ringbuf_discard(event, 0);
     return 0;
   }
-
   event->local_port = BPF_CORE_READ(retval, __sk_common.skc_num);
-
   event->remote_port = bpf_ntohs(BPF_CORE_READ(retval, __sk_common.skc_dport));
-
+  event->type = ACCEPT;
+  event->sock_cookie = bpf_get_socket_cookie(retval);
   bpf_ringbuf_submit(event, 0);
-
   return 0;
 }
 
@@ -195,8 +202,13 @@ int BPF_PROG(inet_bind, struct socket *sock, struct sockaddr *uaddr,
       __builtin_memcpy(event->local_addr, &addr.sin6_addr,
                        sizeof(addr.sin6_addr));
     }
+  } else {
+    bpf_ringbuf_discard(event, 0);
+    return 0;
   }
 
+  event->type = BIND;
+  event->sock_cookie = bpf_get_socket_cookie(sock->sk);
   bpf_ringbuf_submit(event, 0);
 
   return 0;
@@ -236,8 +248,13 @@ int BPF_PROG(inet_listen, struct socket *sock, int backlog, int retval) {
 
     event->local_port = port;
     __builtin_memcpy(event->local_addr, &addr, sizeof(addr));
+  } else {
+    bpf_ringbuf_discard(event, 0);
+    return 0;
   }
 
+  event->type = LISTEN;
+  event->sock_cookie = bpf_get_socket_cookie(sock->sk);
   bpf_ringbuf_submit(event, 0);
 
   return 0;

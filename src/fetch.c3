@@ -1,10 +1,26 @@
 module fetch;
 import std::io;
 import libbpf;
+import linsys;
 import std::collections::list;
+import std::thread::channel;
 
 const ushort AF_INET  = 2;
 const ushort AF_INET6 = 10;
+
+struct Application {
+  uint id;
+  String name;
+  String executable;
+  List {uint} processes;
+}
+
+enum EventType{
+  CONNECT,
+  ACCEPT,
+  BIND,
+  LISTEN,
+}
 
 struct Event {
     uint pid;
@@ -20,8 +36,9 @@ struct Event {
     char[16] remote_addr;
 
     ulong timestamp_ns;
+    EventType event_type;
+    ulong sock_cookie;
 }
-
 
 fn String convert_ip(Allocator allocator, ushort family, char[16] addr) {
     switch (family) {
@@ -62,96 +79,120 @@ fn String convert_ip(Allocator allocator, ushort family, char[16] addr) {
     }
 }
 
-fn int ringbuf_callback(void* ctx, void* data, usz size) => @pool() {
+
+struct RingBufContext {
+    List{Event} events;
+    bool has_value;
+}
+
+fn int ringbuf_callback(void* ctx, void* data, usz size) {
+    RingBufContext* context = ctx;
     if (size != Event::size) return 0;
 
-    Event* event = (Event*)data;
-
-    io::printfn(
-        "pid=%d tid=%d family=%d protocol=%d local_port=%d remote_port=%d",
-        event.pid,
-        event.tid,
-        event.family,
-        event.protocol,
-        event.local_port,
-        event.remote_port
-    );
-
-    String local_addr  = convert_ip(tmem, event.family, event.local_addr);
-    String remote_addr = convert_ip(tmem, event.family, event.remote_addr);
-    io::printn(local_addr);
-    io::printn(remote_addr);
-
+    Event event;
+    mem::copy(&event, data, Event::size);
+    context.events.push(event);
+    context.has_value = true;
     return 0;
 }
 
-fn void fetch_data_from_ebpf() => @pool() {
-    BpfObject* obj = libbpf::bpf_object__open("/home/vamsi/scripts/fwmp/bpf/fwmp.bpf.o");
+struct NetworkChannel {
+    BufferedChannel{Event}* channel;
+}
 
-    if (obj == null) {
-        io::printn("failed to open BPF object");
-        return;
-    }
+fn void fetch_data_from_ebpf(NetworkChannel* nc) {
+    LibcAllocator libc;
 
-    int err = libbpf::bpf_object__load(obj);
+    @pool_init(&libc, 8192) {
+        BpfObject* obj = libbpf::bpf_object__open("/home/vamsi/scripts/fwmp/bpf/fwmp.bpf.o");
 
-    if (err != 0) {
-        io::printfn("failed to load BPF object: %d", err);
-        libbpf::bpf_object__close(obj);
-        return;
-    }
+        if (obj == null) {
+            io::printn("failed to open BPF object");
+            return;
+        }
 
-    List{BpfLink*} links;
-    links.init(tmem);
+        int err = libbpf::bpf_object__load(obj);
 
-    BpfProgram* prog = null;
-
-    while ((prog = libbpf::bpf_object__next_program(obj, prog)) != null) {
-        ZString section = libbpf::bpf_program__section_name(prog);
-
-        if (section == null) continue;
-
-        io::printfn("found program: %s", section);
-
-        BpfLink* link = libbpf::bpf_program__attach(prog);
-
-        if (link == null) {
-            io::printfn("failed to attach %s", section);
-
-            foreach (existing : links) {
-                libbpf::bpf_link__destroy(existing);
-            }
-
+        if (err != 0) {
+            io::printfn("failed to load BPF object: %d", err);
             libbpf::bpf_object__close(obj);
             return;
         }
 
-        links.push(link);
+        List{BpfLink*} links;
+        links.init(tmem);
 
-        io::printfn("attached %s", section);
-    }
+        BpfProgram* prog = null;
 
-    BpfMap* map = libbpf::bpf_object__find_map_by_name(obj, "events");
+        RingBufContext ring_buf_ctx;
 
-    int map_fd = libbpf::bpf_map__fd(map);
+        while ((prog = libbpf::bpf_object__next_program(obj, prog)) != null) {
+            ZString section = libbpf::bpf_program__section_name(prog);
 
-    RingBuffer* rb = libbpf::ring_buffer__new(map_fd, &ringbuf_callback, null, null);
+            if (section == null) continue;
 
-    assert (rb != null);
+            io::printfn("found program: %s", section);
 
-    while (true) {
-        int ret = libbpf::ring_buffer__poll(rb, 100);
+            BpfLink* link = libbpf::bpf_program__attach(prog);
 
-        if (ret < 0) {
-            io::printfn("poll error: %d", ret);
-            break;
+            if (link == null) {
+                io::printfn("failed to attach %s", section);
+
+                foreach (existing : links) {
+                    libbpf::bpf_link__destroy(existing);
+                }
+
+                libbpf::bpf_object__close(obj);
+                return;
+            }
+
+            links.push(link);
+
+            io::printfn("attached %s", section);
         }
-    }
 
-    foreach (link : links) {
-        libbpf::bpf_link__destroy(link);
-    }
+        BpfMap* map = libbpf::bpf_object__find_map_by_name(obj, "events");
 
-    libbpf::ring_buffer__free(rb);
-    libbpf::bpf_object__close(obj);
+        int map_fd = libbpf::bpf_map__fd(map);
+
+        RingBuffer* rb = libbpf::ring_buffer__new(map_fd, &ringbuf_callback, &ring_buf_ctx, null);
+
+        assert (rb != null);
+
+        while (true) {
+            int ret = libbpf::ring_buffer__poll(rb, 100);
+
+            if (ret < 0) {
+                io::printfn("poll error: %d", ret);
+                break;
+            }
+
+            foreach (event : ring_buf_ctx.events) {
+                io::printn(event);
+                if (!@ok(nc.channel.try_push(event))) io::printn("Failed to send event");
+            }
+
+            ring_buf_ctx.events.clear();
+        }
+
+        foreach (link : links) {
+            libbpf::bpf_link__destroy(link);
+        }
+
+        libbpf::ring_buffer__free(rb);
+        libbpf::bpf_object__close(obj);
+    };
+}
+
+fn void get_process_info(NetworkChannel* recv) {
+    LibcAllocator libc;
+
+    @pool_init(&libc, 8192) {
+        for (;;) {
+            Event? ev       = recv.channel.try_pop();
+            if (catch ev) continue;
+            ProcessInfo pi = linsys::process::info(tmem, (int)ev.pid) ?? { };
+            io::printn(pi);
+        }
+    };
 }

@@ -6,6 +6,7 @@ import std::thread;
 import parser;
 import libbpf;
 import fetch;
+import std::thread::channel;
 
 const clay::ClayColor COLOR_LIGHT  = { 224, 215, 210, 255 };
 const clay::ClayColor COLOR_RED    = { 168, 66, 28, 255 };
@@ -37,7 +38,18 @@ const clay::ClayColor COLOR_ORANGE = { 225, 138, 50, 255 };
 // }
 
 
-fn void main(String[] args) {
+fn void main(String[] args) => @pool() {
+  Thread t_1, t_2;
 
-  fetch::fetch_data_from_ebpf();
+  NetworkChannel nc = {};
+  nc.channel = channel::create_buffered(tmem, 1024*1024)!!;
+  defer nc.channel.destroy();
+
+  t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;
+  t_2.create((ThreadFn)&fetch::get_process_info, &nc)!!;
+
+  t_1.join()!!;
+  t_2.join()!!;
+
+  nc.channel.close();
 }
