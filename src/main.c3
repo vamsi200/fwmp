@@ -38,7 +38,7 @@ const clay::ClayColor COLOR_ORANGE = { 225, 138, 50, 255 };
 // }
 
 
-fn void main(String[] args) => @pool() {
+fn void main(String[] args) {
   Thread t_1, t_2;
 
   NetworkChannel nc = {};

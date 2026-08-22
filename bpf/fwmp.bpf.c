@@ -45,6 +45,51 @@ struct {
   __uint(max_entries, 1 << 24);
 } events SEC(".maps");
 
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 10240);
+  __type(key, __u64);   // sock_cookie
+  __type(value, __u64); // cumulative bytes
+} sock_bytes_sent SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 10240);
+  __type(key, __u64);
+  __type(value, __u64);
+} sock_bytes_recv SEC(".maps");
+
+SEC("fexit/tcp_sendmsg")
+int BPF_PROG(tcp_sendmsg_exit, struct sock *sk, struct msghdr *msg, size_t size,
+             int retval) {
+  if (retval <= 0)
+    return 0;
+  __u64 cookie = bpf_get_socket_cookie(sk);
+  __u64 *val = bpf_map_lookup_elem(&sock_bytes_sent, &cookie);
+  if (val) {
+    __sync_fetch_and_add(val, retval);
+  } else {
+    __u64 initial = retval;
+    bpf_map_update_elem(&sock_bytes_sent, &cookie, &initial, BPF_ANY);
+  }
+  return 0;
+}
+
+SEC("fexit/tcp_cleanup_rbuf")
+int BPF_PROG(tcp_cleanup_rbuf_exit, struct sock *sk, int copied) {
+  if (copied <= 0)
+    return 0;
+  __u64 cookie = bpf_get_socket_cookie(sk);
+  __u64 *val = bpf_map_lookup_elem(&sock_bytes_recv, &cookie);
+  if (val) {
+    __sync_fetch_and_add(val, copied);
+  } else {
+    __u64 initial = copied;
+    bpf_map_update_elem(&sock_bytes_recv, &cookie, &initial, BPF_ANY);
+  }
+  return 0;
+}
+
 SEC("fexit/tcp_v4_connect")
 int BPF_PROG(tcp_v4_connect_exit, struct sock *sk, struct sockaddr *uaddr,
              int addr_len, int ret) {
