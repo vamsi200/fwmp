@@ -15,12 +15,7 @@
 const ushort AF_INET = 2;
 const ushort AF_INET6 = 10;
 
-enum event_type {
-  CONNECT,
-  ACCEPT,
-  BIND,
-  LISTEN,
-};
+enum event_type { CONNECT, ACCEPT, BIND, LISTEN, CLOSE };
 
 struct event {
   __u32 pid;
@@ -300,6 +295,43 @@ int BPF_PROG(inet_listen, struct socket *sock, int backlog, int retval) {
 
   event->type = LISTEN;
   event->sock_cookie = bpf_get_socket_cookie(sock->sk);
+  bpf_ringbuf_submit(event, 0);
+
+  return 0;
+}
+
+SEC("fexit/tcp_close")
+int BPF_PROG(tcp_close, struct sock *sk, long int timeout) {
+  if (!sk)
+    return 0;
+
+  struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+  if (!event)
+    return 0;
+
+  __u64 pid_tgid = bpf_get_current_pid_tgid();
+  event->pid = pid_tgid >> 32;
+  event->tid = (__u32)pid_tgid;
+
+  event->timestamp_ns = bpf_ktime_get_ns();
+
+  event->family = AF_INET;
+  event->protocol = 6;
+
+  __u32 local_addr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+
+  __u32 remote_addr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+
+  __builtin_memcpy(event->local_addr, &local_addr, 4);
+  __builtin_memcpy(event->remote_addr, &remote_addr, 4);
+
+  event->local_port = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+  event->remote_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+  event->type = CLOSE;
+
+  event->sock_cookie = bpf_get_socket_cookie(sk);
   bpf_ringbuf_submit(event, 0);
 
   return 0;
