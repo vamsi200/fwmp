@@ -31,6 +31,7 @@ enum EventType {
     ACCEPT,
     BIND,
     LISTEN,
+    CLOSE,
 }
 
 struct Event {
@@ -55,18 +56,16 @@ alias SocketId = ulong;
 alias AppId = ulong;
 
 struct Socket {
-    SocketId id;
-
     SocketIdentity identity;
 
     SocketState state;
 
-    TrafficStats stats;
-
+    SocketId sock_cookie;
     // Maybe{DnsInfo} dns;
     // 
     // Maybe{TlsInfo} tls;
 }
+
 
 enum SocketState {
     ESTABLISHED,
@@ -84,7 +83,7 @@ enum SocketState {
 }
 
 struct SocketIdentity {
-    AppId app;
+    // AppId app_id;
     Endpoint local;
     Endpoint remote;
     Protocol protocol;
@@ -95,7 +94,20 @@ struct Endpoint {
     ushort port;
 }
 
+struct NetworkStats {
+    BpfMap* sent;
+    BpfMap* recv;
+}
+
+fn TrafficStats NetworkStats.traffic(NetworkStats* self, ulong cookie) {
+    ulong sent = lookup_bytes(self.sent, cookie);
+    ulong recv = lookup_bytes(self.recv, cookie);
+
+    return { .cookie = cookie, .sent = sent, .received = recv };
+}
+
 struct TrafficStats {
+    ulong cookie;
     ulong sent;
     ulong received;
 }
@@ -184,7 +196,12 @@ fn int sock_bytes_recv_callback(void* ctx, void* data, usz size) {
 }
 
 struct NetworkChannel {
+    LibcAllocator libc;
     BufferedChannel{Event}* channel;
+    int map_fd;
+    RingBufContext* ring_buf_ctx;
+    RingBuffer* rb;
+    NetworkStats network_stats;
 }
 
 fn ulong lookup_bytes(BpfMap* map, ulong cookie) {
@@ -200,133 +217,160 @@ fn void fetch_data_from_ebpf(NetworkChannel* nc) {
     LibcAllocator libc;
 
     @pool_init(&libc, 8192) {
-        BpfObject* obj = libbpf::bpf_object__open("/home/vamsi/scripts/fwmp/bpf/fwmp.bpf.o");
-        if (obj == null) {
-            io::printn("failed to open BPF object");
-            return;
-        }
+        List{ulong} live_cookies;
+        live_cookies.init(tmem);
 
-        int err = libbpf::bpf_object__load(obj);
-        if (err != 0) {
-            io::printfn("failed to load BPF object: %d", err);
-            libbpf::bpf_object__close(obj);
-            return;
-        }
-
-        List{BpfLink*} links;
-        links.init(tmem);
-        BpfProgram* prog = null;
-        RingBufContext ring_buf_ctx;
-
-        while ((prog = libbpf::bpf_object__next_program(obj, prog)) != null) {
-            ZString section = libbpf::bpf_program__section_name(prog);
-            if (section == null) continue;
-            io::printfn("found program: %s", section);
-            BpfLink* link = libbpf::bpf_program__attach(prog);
-            if (link == null) {
-                io::printfn("failed to attach %s", section);
-                foreach (existing : links) {
-                    libbpf::bpf_link__destroy(existing);
-                }
-                libbpf::bpf_object__close(obj);
-                return;
-            }
-            links.push(link);
-            io::printfn("attached %s", section);
-        }
-
-        BpfMap* map             = libbpf::bpf_object__find_map_by_name(obj, "events");
-        BpfMap* sock_bytes_sent = libbpf::bpf_object__find_map_by_name(obj, "sock_bytes_sent");
-        BpfMap* sock_bytes_recv = libbpf::bpf_object__find_map_by_name(obj, "sock_bytes_recv");
-
-
-        int map_fd = libbpf::bpf_map__fd(map);
-        RingBuffer* rb = libbpf::ring_buffer__new(map_fd, &ringbuf_callback, &ring_buf_ctx, null);
-
-        assert (rb != null);
         while (true) {
-            int ret = libbpf::ring_buffer__poll(rb, 100);
+            int ret = libbpf::ring_buffer__poll(nc.rb, 100);
+
             if (ret < 0) {
                 io::printfn("poll error: %d", ret);
                 break;
             }
 
-            foreach (event : ring_buf_ctx.events) {
-                io::printn(event);
-                ulong sent = lookup_bytes(sock_bytes_sent, event.sock_cookie);
-                ulong recv = lookup_bytes(sock_bytes_recv, event.sock_cookie);
-                io::printfn("cookie: %d, sent: %d, recv: %d", event.sock_cookie, sent, recv);
-                if (!@ok(nc.channel.try_push(event))) io::printn("Failed to send event");
+            foreach (event : nc.ring_buf_ctx.events) {
+                if (event.event_type == EventType.CLOSE) {
+                    foreach (i, cookie : live_cookies) {
+                        if (cookie == event.sock_cookie) {
+                            live_cookies.remove_at(i);
+                            break;
+                        }
+                    }
+                } else {
+                    bool tracked = false;
+
+                    foreach (cookie : live_cookies) {
+                        if (cookie == event.sock_cookie) {
+                            tracked = true;
+                            break;
+                        }
+                    }
+
+                    if (!tracked) {
+                        live_cookies.push(event.sock_cookie);
+                    }
+                }
+
+                if (!@ok(nc.channel.try_push(event))) {
+                    io::printn("Failed to send event");
+                }
             }
 
-            ring_buf_ctx.events.clear();
+            nc.ring_buf_ctx.events.clear();
         }
-
-        foreach (link : links) {
-            libbpf::bpf_link__destroy(link);
-        }
-
-        libbpf::ring_buffer__free(rb);
-        libbpf::bpf_object__close(obj);
     };
 }
 
-fn void get_process_info(NetworkChannel* recv) {
+faultdef EVENT_NOT_FOUND_ERROR, EXISTING_SOCKET;
+
+struct NetworkInfo {
+    Application application;
+    Event event;
+}
+
+fn Event? get_process_info(
+    NetworkChannel* recv,
+    HashMap{Application, ulong}* application,
+    HashMap{ulong, Socket}* sockets,
+    ulong app_id
+) {
     LibcAllocator libc;
 
-    List{uint} pids = { };
-    pids.init(&libc);
-    defer pids.free();
+    NetworkInfo ni = { };
 
-    List{SocketId} sock_id = { };
-    sock_id.init(&libc);
-    defer sock_id.free();
-
-    List{Socket} sock = { };
-    sock.init(&libc);
-    defer sock.free();
-
-    HashMap{Application, ulong} application;
-    application.init(&libc);
-    defer application.free();
-
-    ulong app_id = 0;
     @pool_init(&libc, 8192) {
-        // for (;;) {
-        // Event? ev = recv.channel.try_pop();
-        // if (catch ev) continue;
-        // ProcessInfo pi  = linsys::process::info(tmem, (int)ev.pid) ?? { };
-        // Application app = { .name = pi.process.name, .executable = pi.exe_path };
-        // if (!(application.has_key(app))) {
-        //     app_id += 1;
-        //     application.set(app, app_id);
-        // }
-        // 
-        // sock_id.push(ev.sock_cookie);
-        // pids.push(ev.pid);
-        // 
-        // 
-        // Endpoint ep_local  = { .addr = ev.local_addr, .port = ev.local_port };
-        // Endpoint ep_remote = { .addr = ev.remote_addr, .port = ev.remote_port };
-        // SocketIdentity si = {
-        //     .app = app_id,
-        //     .local = ep_local,
-        //     .remote = ep_remote,
-        //     .protocol = Protocol.TCP
-        // };
-        // TrafficStats ts = { .sent = 0, .received = 0 };
-        // 
-        // Socket sk = {
-        //     .id = ev.sock_cookie,
-        //     .identity = si,
-        //     .state = SocketState.ESTABLISHED,
-        //     .stats = ts
-        // };
-        // io::printn(sk);
-        // }
+        Event? ev = recv.channel.try_pop();
+
+        if (catch ev) return EVENT_NOT_FOUND_ERROR~;
+
+        if (ev.event_type == EventType.CLOSE) {
+            sockets.remove(ev.sock_cookie);
+        }
+
+        Socket*? existing = sockets.get_ref(ev.sock_cookie);
+
+        if (@ok(existing)) return EXISTING_SOCKET~;
+
+        ProcessInfo pi = linsys::process::info(tmem, (int)ev.pid) ?? { };
+
+        Application app = { .name = pi.process.name, .executable = pi.exe_path };
+
+        if (!application.has_key(app)) {
+            app_id += 1;
+            application.set(app, app_id);
+        }
+
+        Endpoint local = { .addr = ev.local_addr, .port = ev.local_port };
+
+        Endpoint remote = { .addr = ev.remote_addr, .port = ev.remote_port };
+
+        SocketIdentity identity = { .local = local, .remote = remote, .protocol = Protocol.TCP };
+
+        Socket new_socket = {
+            .identity = identity,
+            .state = SocketState.ESTABLISHED,
+            .sock_cookie = ev.sock_cookie,
+        };
+
+        sockets.set(ev.sock_cookie, new_socket);
+
+        return ev;
     };
 }
 
-fn Application fetch_inspect_information(Allocator allocator, Socket* sock) {
-    abort("");
+// TODO: Update later
+struct InspectInformation {
+    char[16] remote_addr;
+    char[16] local_addr;
+    ushort local_port;
+    ushort remote_port;
+    String hostname;
+    String cname;
+    uint pid;
+    SocketState sock_state;
+    NetworkStats* network_stats;
+}
+
+struct NetworkSnapshot {
+    List{Application} app;
+    List{Socket} sock;
+    InspectInformation information;
+}
+
+fn void? collect_network_snapshot(NetworkChannel* network_channel) {
+    // ulong is appid
+    HashMap{Application, ulong} application;
+    application.init(&network_channel.libc);
+    defer application.free();
+
+    // ulong is socket_id
+    HashMap{ulong, Socket} sockets;
+    sockets.init(&network_channel.libc);
+    defer sockets.free();
+
+    ulong id = 0;
+
+    for (;;) {
+        Event? ev = get_process_info(network_channel, &application, &sockets, id);
+        if (catch ev) continue;
+        // io::printn(ev);
+
+        Socket*? sks = sockets.get_ref(ev.sock_cookie);
+        if (catch sks) continue;
+
+        ulong sent = lookup_bytes(network_channel.network_stats.sent, sks.sock_cookie);
+        ulong recv = lookup_bytes(network_channel.network_stats.recv, sks.sock_cookie);
+
+        io::printfn("cookie: %d", sks.sock_cookie);
+        io::printfn("sent: %d, recv: %d", sent, recv);
+    }
+}
+
+fn InspectInformation fetch_inspect_information(
+    Allocator allocator,
+    Socket* sock,
+    NetworkChannel* channel
+) {
+    // TrafficStats? ts = channel.traffic_channel.try_pop();
+    abort("not impl");
 }
