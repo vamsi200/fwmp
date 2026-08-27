@@ -1,54 +1,477 @@
 module fwmp;
 import std::io;
 import clay;
-import raylib6;
+import raylib6::rl;
 import std::thread;
 import parser;
 import libbpf;
 import fetch;
 import std::thread::channel;
 import std::collections::list;
+import std::time;
+import std::math::random;
+import std::collections::map;
 
-const clay::ClayColor COLOR_LIGHT  = { 224, 215, 210, 255 };
-const clay::ClayColor COLOR_RED    = { 168, 66, 28, 255 };
-const clay::ClayColor COLOR_ORANGE = { 225, 138, 50, 255 };
+const clay::ClayColor COLOR_BG        = { 6, 8, 10, 255 };
+const clay::ClayColor COLOR_BORDER    = { 28, 58, 38, 255 };
+const clay::ClayColor COLOR_DIM       = { 42, 107, 69, 255 };
+const clay::ClayColor COLOR_TEXT      = { 62, 240, 124, 255 };
+const clay::ClayColor COLOR_ACTIVE_BG = { 18, 39, 26, 255 };
+const clay::ClayColor COLOR_ACTIVE_TX = { 234, 255, 156, 255 };
+const clay::ClayColor COLOR_WARN      = { 224, 169, 76, 255 };
+const clay::ClayColor COLOR_NONE      = { 0, 0, 0, 0 };
 
-// fn void on_error(ClayErrorData error) {
-//     io::printfn(
-//         "clay error (type=%d): %.*s",
-//         (int)error.error_type,
-//         error.error_text.length,
-//         error.error_text.chars
-//     );
-// }
-// 
-// fn void layout() {
-//   clay::@ui_with_id(
-//     clay::@id("testc"),
-//     {
-//       .layout = {
-//           .sizing = {.width = clay::sizing_grow(), .height = clay::sizing_grow()},
-//           .padding = clay::padding_all(15),
-//           .child_gap = 15
-//         },
-//         .background_color = COLOR_LIGHT
-//   }
-//   ){
-// 
-//     };
-// }
+RLFont g_font;
+
+const int MAX_APPS  = 32;
+const int MAX_SOCKS = 64;
+
+Application[MAX_APPS] g_app_list;
+ulong[MAX_APPS] g_app_ids;
+int g_app_count = 0;
+
+Socket[MAX_SOCKS] g_sock_list;
+int g_sock_count = 0;
+
+NetworkSnapshot g_snapshot;
+bool g_has_snapshot = false;
+
+int g_app_idx  = 0;
+int g_sock_idx = 0;
+
+fn void poll_snapshot(NetworkChannel* channel) {
+    NetworkSnapshot? snap = channel.snapshot_channel.try_pop();
+    if (try snap) {
+        if (snap.app.len() > 0) {
+            g_snapshot = snap;
+            g_has_snapshot = true;
+        }
+    }
+}
+
+macro clay::ClayPadding padding_xy(ushort x, ushort y) => { x, x, y, y };
+
+macro clay::ClayString cstr(String s) => clay::make_string(s);
+
+macro clay::ClayTextElementConfig text_cfg(
+    clay::ClayColor color,
+    ushort size = 20
+) => { .text_color = color, .font_size = size };
+
+fn void row_text(String text, bool active, bool warn) {
+    clay::ClayColor color = active ? COLOR_ACTIVE_TX : (warn ? COLOR_WARN : COLOR_DIM);
+    clay::@ui(
+        {
+            .layout = {
+                .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(18) },
+                .padding = padding_xy(4, 2),
+            },
+            .background_color = active ? COLOR_ACTIVE_BG : COLOR_NONE,
+        }
+    ) {
+        clay::@text(cstr(text), text_cfg(color));
+    };
+}
+
+fn void panel_header(String text) {
+    clay::@ui({ .layout = { .padding = padding_xy(0, 4) }, }) {
+        clay::@text(cstr(text), text_cfg(COLOR_DIM));
+    };
+}
+
+fn void inspect_line(String label, String value, bool highlight) {
+    clay::@ui(
+        {
+            .layout = {
+                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                .sizing = { .width = clay::sizing_grow() },
+                .child_gap = 8,
+            },
+        }
+    ) {
+        clay::@text(cstr(label), text_cfg(COLOR_DIM));
+        clay::@text(cstr(value), text_cfg(highlight ? COLOR_ACTIVE_TX : COLOR_TEXT));
+    };
+}
+
+
+fn void layout(NetworkChannel* channel) {
+    poll_snapshot(channel);
+    if (!g_has_snapshot) {
+        // TODO: draw a "waiting for data" placeholder panel and return
+        return;
+    }
+
+    g_app_count = 0;
+    g_snapshot.app.@each(; Application app, ulong id) {
+        // if (g_app_count >= MAX_APPS) break;
+        g_app_list[g_app_count] = app;
+        g_app_ids[g_app_count] = id;
+        g_app_count++;
+    };
+    if (g_app_idx >= g_app_count) g_app_idx = 0;
+    ulong selected_app_id = g_app_count > 0 ? g_app_ids[g_app_idx] : 0;
+
+    g_sock_count = 0;
+    foreach (s : g_snapshot.sock) {
+        if (s.app_id != selected_app_id) continue;
+        if (g_sock_count >= MAX_SOCKS) break;
+        g_sock_list[g_sock_count] = s;
+        g_sock_count++;
+    }
+    if (g_sock_idx >= g_sock_count) g_sock_idx = 0;
+
+    Socket* sock             = g_sock_count > 0 ? &g_sock_list[g_sock_idx] : null;
+    TrafficStats* stats      = null;
+    InspectInformation* info = null;
+    if (sock) {
+        foreach (&ts : g_snapshot.traffic_stats) {
+            if (ts.sock_cookie == sock.sock_cookie) {
+                stats = ts;
+                break;
+            }
+        }
+        foreach (&ii : g_snapshot.information) {
+            if (ii.traffic_stats.sock_cookie == sock.sock_cookie) {
+                info = ii;
+                break;
+            }
+        }
+    }
+
+    clay::@ui_with_id(
+        clay::@id("fwmp-root"),
+        {
+            .layout = {
+                .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
+                .padding = clay::padding_all(15),
+                .child_gap = 10,
+            },
+            .background_color = COLOR_BG,
+        }
+    ) {
+        // titlebar
+        clay::@ui_with_id(
+            clay::@id("titlebar"),
+            {
+                .layout = {
+                    .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(24) },
+                },
+            }
+        ) {
+            clay::@text(clay::@string("fwmp v0.1 — clay/gui"), text_cfg(COLOR_DIM));
+        };
+
+        clay::@ui_with_id(
+            clay::@id("cols"),
+            {
+                .layout = {
+                    .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
+                    .child_gap = 15,
+                },
+            }
+        ) {
+            // apps column
+            clay::@ui_with_id(
+                clay::@id("col-apps"),
+                {
+                    .layout = {
+                        .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                        .sizing = {
+                            .width = clay::sizing_fixed(160),
+                            .height = clay::sizing_grow()
+                        },
+                    },
+                    .border = { .color = COLOR_BORDER, .width = { .right = 1 } },
+                }
+            ) {
+                panel_header("apps");
+                for (int i = 0; i < g_app_count; i++) {
+                    row_text(g_app_list[i].name, i == g_app_idx, false);
+                }
+            };
+
+            // sockets column
+            clay::@ui_with_id(
+                clay::@id("col-sockets"),
+                {
+                    .layout = {
+                        .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                        .sizing = {
+                            .width = clay::sizing_fixed(260),
+                            .height = clay::sizing_grow()
+                        },
+                    },
+                    .border = { .color = COLOR_BORDER, .width = { .right = 1 } },
+                }
+            ) {
+                String app_name = g_app_count > 0 ? g_app_list[g_app_idx].name : "—";
+                panel_header(string::tformat("sockets [%s]", app_name));
+                for (int i = 0; i < g_sock_count; i++) {
+                    Socket s = g_sock_list[i];
+                    String state_short = s.state
+                        == SocketState.ESTABLISHED ? "ESTB" : "TWAIT"; // TODO: Change this
+                    String label = string::tformat(
+                        "%s:%d  %s",
+                        fetch::convert_ip(&channel.libc, 2, s.identity.remote.addr),
+                        s.identity.remote.port,
+                        state_short
+                    );
+                    row_text(label, i == g_sock_idx, s.state != SocketState.ESTABLISHED);
+                }
+            };
+
+            // inspect column
+            clay::@ui_with_id(
+                clay::@id("col-inspect"),
+                {
+                    .layout = {
+                        .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                        .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
+                        .child_gap = 2,
+                    },
+                }
+            ) {
+                panel_header("inspect");
+                if (sock) {
+                    inspect_line(
+                        "remote    ",
+                        string::tformat(
+                            "%s:%d",
+                            fetch::convert_ip(&channel.libc, 2, sock.identity.remote.addr),
+                            sock.identity.remote.port
+                        ),
+                        true
+                    );
+                    inspect_line(
+                        "local     ",
+                        string::tformat(
+                            "%s:%d",
+                            fetch::convert_ip(&channel.libc, 2, sock.identity.local.addr),
+                            sock.identity.local.port
+                        ),
+                        false
+                    );
+                    if (info) {
+                        inspect_line("host      ", info.hostname, false);
+                        inspect_line("cname     ", info.cname, false);
+                        inspect_line("pid       ", string::tformat("%d", info.pid), false);
+                    }
+                    if (stats) {
+                        inspect_line(
+                            "sent      ",
+                            string::tformat("%dKB", stats.sent / 1024),
+                            false
+                        );
+                        inspect_line(
+                            "recv      ",
+                            string::tformat("%dKB", stats.received / 1024),
+                            false
+                        );
+                    }
+                    inspect_line(
+                        "state     ",
+                        string::tformat("%s", sock.state),
+                        sock.state == SocketState.ESTABLISHED
+                    );
+                } else {
+                    clay::@text(clay::@string("no sockets"), text_cfg(COLOR_DIM));
+                }
+            };
+        };
+
+        // footer
+        clay::@ui_with_id(
+            clay::@id("footer"),
+            {
+                .layout = {
+                    .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(20) },
+                },
+                .border = { .color = COLOR_BORDER, .width = { .top = 1 } },
+            }
+        ) {
+            clay::@text(
+                clay::@string("up/down apps   tab sockets   enter inspect   r reroll   / filter"),
+                text_cfg(COLOR_DIM, 13)
+            );
+        };
+    };
+}
+
+fn clay::ClayDimensions measure_text(
+    clay::ClayStringSlice text,
+    clay::ClayTextElementConfig* config,
+    void* user_data
+) {
+    String s        = (String)text.chars[:text.length];
+    ZString z       = s.zstr_tcopy();
+    rl::RLFont font = g_font;
+    rl::RLVector2 size = rl::measure_text_ex(
+        font,
+        z,
+        (float)config.font_size,
+        (float)config.letter_spacing
+    );
+    return { .width = size.x, .height = size.y };
+}
+
+fn rl::RLColor to_rl_color(clay::ClayColor c) => { (char)c.r, (char)c.g, (char)c.b, (char)c.a };
+
+fn void clay_raylib_render(clay::ClayRenderCommandArray* commands) {
+    for (int i = 0; i < commands.length; i++) {
+        clay::ClayRenderCommand* cmd = clay::render_command_array_get(commands, i);
+        clay::ClayBoundingBox bb     = cmd.bounding_box;
+        rl::RLRectangle rect         = { bb.x, bb.y, bb.width, bb.height };
+
+        switch (cmd.command_type) {
+            case clay::ClayRenderCommandType.RECTANGLE:
+                clay::ClayRectangleRenderData rd = cmd.render_data.rectangle;
+                rl::RLColor color = to_rl_color(rd.background_color);
+                if (rd.corner_radius.top_left > 0) {
+                    float shortest = bb.width < bb.height ? bb.width : bb.height;
+                    float roundness = shortest > 0 ? (2.0f * rd.corner_radius.top_left)
+                        / shortest : 0;
+                    rl::draw_rectangle_rounded(rect, roundness, 8, color);
+                } else {
+                    rl::draw_rectangle_rec(rect, color);
+                }
+            case clay::ClayRenderCommandType.BORDER:
+                clay::ClayBorderRenderData bd = cmd.render_data.border;
+                rl::RLColor color = to_rl_color(bd.color);
+                if (bd.width.left > 0) {
+                    rl::draw_rectangle((int)bb.x, (int)bb.y, bd.width.left, (int)bb.height, color);
+                }
+                if (bd.width.right > 0) {
+                    rl::draw_rectangle(
+                        (int)(bb.x + bb.width) - bd.width.right,
+                        (int)bb.y,
+                        bd.width.right,
+                        (int)bb.height,
+                        color
+                    );
+                }
+                if (bd.width.top > 0) {
+                    rl::draw_rectangle((int)bb.x, (int)bb.y, (int)bb.width, bd.width.top, color);
+                }
+                if (bd.width.bottom > 0) {
+                    rl::draw_rectangle(
+                        (int)bb.x,
+                        (int)(bb.y + bb.height) - bd.width.bottom,
+                        (int)bb.width,
+                        bd.width.bottom,
+                        color
+                    );
+                }
+            case clay::ClayRenderCommandType.TEXT:
+                clay::ClayTextRenderData td = cmd.render_data.text;
+                String s = (String)td.string_contents.chars[:td.string_contents.length];
+                ZString z = s.zstr_tcopy();
+                rl::RLFont font = g_font;
+                rl::draw_text_ex(
+                    font,
+                    z,
+                    { bb.x, bb.y },
+                    (float)td.font_size,
+                    (float)td.letter_spacing,
+                    to_rl_color(td.text_color)
+                );
+            case clay::ClayRenderCommandType.SCISSOR_START:
+                rl::begin_scissor_mode((int)bb.x, (int)bb.y, (int)bb.width, (int)bb.height);
+            case clay::ClayRenderCommandType.SCISSOR_END:
+                rl::end_scissor_mode();
+            case clay::ClayRenderCommandType.IMAGE:
+            case clay::ClayRenderCommandType.CUSTOM:
+            case clay::ClayRenderCommandType.OVERLAY_COLOR_START:
+            case clay::ClayRenderCommandType.OVERLAY_COLOR_END:
+            case clay::ClayRenderCommandType.NONE:
+                nextcase default;
+            default:
+                break;
+        }
+    }
+}
+
+fn void on_error(clay::ClayErrorData error_data) {
+    io::eprintfn(
+        "clay error: %s",
+        (String)error_data.error_text.chars[:error_data.error_text.length]
+    );
+}
+
+fn void init_ui(NetworkChannel* channel) {
+    @pool_init(&channel.libc, 8192) {
+        rl::init_window(960, 600, "fwmp");
+        g_font = rl::load_font(
+            "/home/vamsi/.local/share/fonts/Iosevka/IosevkaNerdFont-Regular.ttf"
+        );
+        defer rl::unload_font(g_font);
+        g_font.texture.set_filter(rl::RLTextureFilter.BILINEAR);
+
+        defer rl::close_window();
+        rl::set_target_fps(60);
+
+        uint mem_size   = clay::min_memory_size();
+        char[] clay_buf = mem::new_array(char, mem_size);
+        defer mem::free(clay_buf);
+        clay::ClayArena arena = clay::create_arena_with_capacity_and_memory(mem_size, clay_buf.ptr);
+
+        clay::ClayContext* ctx = clay::initialize(
+            arena,
+            { .width = (float)rl::get_screen_width(), .height = (float)rl::get_screen_height() },
+            { .handler = &on_error }
+        );
+        clay::set_current_context(ctx);
+        clay::set_measure_text_function(&measure_text, null);
+
+        while (!rl::window_should_close()) {
+            if (rl::is_key_pressed(rl::RLKeyboardKey.DOWN)) {
+                g_sock_idx = 0;
+                if (g_app_count > 0) g_app_idx = math::min(g_app_idx + 1, g_app_count - 1);
+            }
+            if (rl::is_key_pressed(rl::RLKeyboardKey.UP)) {
+                g_sock_idx = 0;
+                g_app_idx = math::max(g_app_idx - 1, 0);
+            }
+            if (rl::is_key_pressed(rl::RLKeyboardKey.TAB)) {
+                if (g_sock_count > 0) g_sock_idx = (g_sock_idx + 1) % g_sock_count;
+            }
+
+            clay::set_layout_dimensions(
+                {
+                    .width = (float)rl::get_screen_width(),
+                    .height = (float)rl::get_screen_height(),
+                }
+            );
+
+            clay::begin_layout();
+            layout(channel);
+            clay::ClayRenderCommandArray cmds = clay::end_layout(rl::get_frame_time());
+
+            rl::begin_drawing();
+            rl::clear_background(rl::BLACK);
+            clay_raylib_render(&cmds);
+            rl::end_drawing();
+        }
+    };
+}
 
 
 fn void main(String[] args) {
-    Thread t_1, t_2;
+    Thread t_1, t_2, t_3;
 
     NetworkChannel nc = { };
     LibcAllocator libc;
 
-    nc.channel = channel::create_buffered(tmem, 1024 * 1024)!!;
     nc.libc = libc;
+    nc.channel = channel::create_buffered(&libc, 1024 * 1024)!!;
+    nc.snapshot_channel = channel::create_buffered(&libc, 1024 * 1024)!!;
 
     defer nc.channel.destroy();
+    defer nc.snapshot_channel.destroy();
 
     BpfObject* obj = libbpf::bpf_object__open("/home/vamsi/scripts/fwmp/bpf/fwmp.bpf.o");
 
@@ -130,17 +553,29 @@ fn void main(String[] args) {
         return;
     }
 
+    HashMap{Application, ulong} app_map;
+    app_map.init(&libc, 1024);
+
+    HashMap{ulong, Socket} sock_map;
+    sock_map.init(&libc, 1024);
+
     nc.map_fd = map_fd;
     nc.ring_buf_ctx = &ring_buf_ctx;
     nc.rb = rb;
     nc.network_stats.sent = sock_bytes_sent;
     nc.network_stats.recv = sock_bytes_recv;
+    nc.duration = (NanoDuration)100_000_000;
+    nc.app_map = app_map;
+    nc.sock_map = sock_map;
+    nc.next_app_id = 0;
 
+    t_3.create((ThreadFn)&init_ui, &nc)!!;
     t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;
-    t_2.create((ThreadFn)&fetch::collect_network_snapshot, &nc)!!;
+    t_2.create((ThreadFn)&fetch::snapshot_loop, &nc)!!;
 
     t_1.join()!!;
     t_2.join()!!;
+    t_3.join()!!;
 
     foreach (link : links) {
         libbpf::bpf_link__destroy(link);
