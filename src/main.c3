@@ -100,6 +100,10 @@ fn void row_text_id(clay::ClayElementId id, String text, bool active, bool warn)
             .layout = {
                 .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(18) },
                 .padding = padding_xy(4, 4),
+                .child_alignment = {
+                    .x = clay::ClayLayoutAlignmentX.LEFT,
+                    .y = clay::ClayLayoutAlignmentY.CENTER
+                },
             },
             .background_color = active ? COLOR_ACTIVE_BG : COLOR_NONE,
         }
@@ -116,17 +120,16 @@ fn String copy_da_string(String str, Allocator allocator) {
 fn void layout(NetworkChannel* channel, bool mouse_clicked) {
     poll_snapshot(channel);
     if (!g_has_snapshot) {
-        // TODO: draw a "waiting for data" placeholder panel and return
         return;
     }
 
     g_app_count = 0;
     g_snapshot.app.@each(; Application app, ulong id) {
-        // if (g_app_count >= MAX_APPS) break;
         g_app_list[g_app_count] = app;
         g_app_ids[g_app_count] = id;
         g_app_count++;
     };
+
     if (g_app_idx >= g_app_count) g_app_idx = 0;
     ulong selected_app_id = g_app_count > 0 ? g_app_ids[g_app_idx] : 0;
 
@@ -230,6 +233,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                             .height = clay::sizing_grow()
                         },
                         .child_gap = 10,
+                        .padding = { .left = 0, .right = 0, .top = 0, .bottom = 20 },
                     },
                     .border = { .color = COLOR_BORDER, .width = { .right = 1 } },
                     .clip = { .vertical = true, .child_offset = scroll_offset },
@@ -237,7 +241,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             );
 
             String app_name = g_app_count > 0 ? g_app_list[g_app_idx].name : "—";
-            panel_header(string::tformat("sockets [%s]", app_name));
+            panel_header(string::tformat("sockets [%s] (%d)", app_name, g_sock_count));
             for (int i = 0; i < g_sock_count; i++) {
                 Socket s           = g_sock_list[i];
                 String state_short = s.state == SocketState.ESTABLISHED ? "ESTB" : "TWAIT";
@@ -291,11 +295,19 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                         ),
                         false
                     );
-                  if (info) {
-                      inspect_line("host      ", copy_da_string(info.hostname, &channel.libc), false);
-                      inspect_line("cname     ", copy_da_string(info.cname, &channel.libc), false);
-                      inspect_line("pid       ", string::tformat("%d", info.pid), false);
-                  }
+                    if (info) {
+                        inspect_line(
+                            "host      ",
+                            copy_da_string(info.hostname, &channel.libc),
+                            false
+                        );
+                        inspect_line(
+                            "cname     ",
+                            copy_da_string(info.cname, &channel.libc),
+                            false
+                        );
+                        inspect_line("pid       ", string::tformat("%d", info.pid), false);
+                    }
                     if (stats) {
                         inspect_line(
                             "sent      ",
@@ -439,8 +451,8 @@ fn void on_error(clay::ClayErrorData error_data) {
 }
 
 fn void init_ui(NetworkChannel* channel) {
-    @pool_init(&channel.libc, 8192) {
-        rl::init_window(960, 600, "fwmp");
+    @pool_init(&channel.libc, 256) {
+        rl::init_window(1280, 720, "fwmp");
         g_font = rl::load_font(
             "/home/vamsi/.local/share/fonts/Iosevka/IosevkaNerdFont-Regular.ttf"
         );
@@ -463,7 +475,11 @@ fn void init_ui(NetworkChannel* channel) {
         clay::set_current_context(ctx);
         clay::set_measure_text_function(&measure_text, null);
 
-        while (!rl::window_should_close()) {
+        bool quit = false;
+        while (!rl::window_should_close() && !quit) {
+            if (rl::is_key_pressed(rl::RLKeyboardKey.Q)) {
+                quit = true;
+            }
             if (rl::is_key_pressed(rl::RLKeyboardKey.DOWN)) {
                 g_sock_idx = 0;
                 if (g_app_count > 0) g_app_idx = math::min(g_app_idx + 1, g_app_count - 1);
@@ -476,17 +492,23 @@ fn void init_ui(NetworkChannel* channel) {
                 if (g_sock_count > 0) g_sock_idx = (g_sock_idx + 1) % g_sock_count;
             }
 
-            static float g_pressed_at = 0;
-            const float GG_TIMEOUT = 0.4f;
+            static float g_pressed_at  = 0;
+            const float GG_TIMEOUT     = 0.4f;
             static bool g_pressed_once = false;
 
+            bool g_scroll_to_top    = false;
+            bool g_scroll_to_bottom = false;
+
             if (rl::is_key_pressed(rl::RLKeyboardKey.G)) {
-                bool shift = rl::is_key_down(rl::RLKeyboardKey.LEFT_SHIFT) || rl::is_key_down(rl::RLKeyboardKey.RIGHT_SHIFT);
+                bool shift = rl::is_key_down(rl::RLKeyboardKey.LEFT_SHIFT)
+                    || rl::is_key_down(rl::RLKeyboardKey.RIGHT_SHIFT);
                 if (shift) {
                     if (g_sock_count > 0) g_sock_idx = g_sock_count - 1;
                     g_pressed_once = false;
+                    g_scroll_to_bottom = true;
                 } else if (g_pressed_once && (rl::get_time() - g_pressed_at) < GG_TIMEOUT) {
                     g_sock_idx = 0;
+                    g_scroll_to_top = true;
                     g_pressed_once = false;
                 } else {
                     g_pressed_once = true;
@@ -494,14 +516,24 @@ fn void init_ui(NetworkChannel* channel) {
                 }
             }
 
-
             rl::RLVector2 mouse_pos = rl::get_mouse_position();
             bool mouse_down         = rl::is_mouse_button_down(rl::RLMouseButton.LEFT);
             bool mouse_clicked      = rl::is_mouse_button_pressed(rl::RLMouseButton.LEFT);
             clay::set_pointer_state({ mouse_pos.x, mouse_pos.y }, mouse_down);
 
-            float wheel_y = rl::get_mouse_wheel_move();
-            clay::update_scroll_containers(false, { 0, wheel_y }, rl::get_frame_time());
+            float wheel_y        = rl::get_mouse_wheel_move();
+            float scroll_delta_y = wheel_y;
+
+            if (g_scroll_to_top) {
+                scroll_delta_y = 100000;
+                g_scroll_to_top = false;
+            }
+            if (g_scroll_to_bottom) {
+                scroll_delta_y = -100000;
+                g_scroll_to_bottom = false;
+            }
+
+            clay::update_scroll_containers(false, { 0, scroll_delta_y }, rl::get_frame_time());
 
             if (wheel_y != 0 && g_sock_count > 0) {
                 g_sock_idx = math::clamp(g_sock_idx - (int)wheel_y, 0, g_sock_count - 1);

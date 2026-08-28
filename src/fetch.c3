@@ -253,7 +253,7 @@ struct NetworkInfo {
 fn NetworkInfo? get_process_info(NetworkChannel* recv) {
     @pool_init(&recv.libc, 8192) {
         NetworkInfo ni = { };
-        Event? ev = recv.channel.try_pop();
+        Event? ev      = recv.channel.try_pop();
         if (catch ev) return EVENT_NOT_FOUND_ERROR~;
 
         if (ev.event_type == EventType.CLOSE) {
@@ -263,11 +263,13 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             existing.last_seen = clock::now();
         }
 
-        ProcessInfo pi  = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
+        ProcessInfo pi = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
         Application app = {
-            .name = pi.process.name,
-            .executable = pi.exe_path,
+            .name = pi.process.name.copy(&recv.libc),
+            .executable = pi.exe_path.copy(&recv.libc),
         };
+
+        defer pi.free(&recv.libc);
 
         ulong app_id;
         if (recv.app_map.has_key(app)) {
@@ -305,30 +307,25 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
     };
 }
 
-fn void? collect_network_snapshot(NetworkChannel* network_channel) {
+fn void? collect_network_snapshot(
+    NetworkChannel* network_channel,
+    List{Socket}* sockets_list,
+    List{TrafficStats}* traffic_stats_list,
+    List{InspectInformation}* inspect_info_list,
+    List{ulong}* to_remove
+) {
     Clock start = clock::now();
 
-    List{ulong} to_remove;
-    to_remove.init(&network_channel.libc);
-    defer to_remove.free();
+    sockets_list.clear();
+    traffic_stats_list.clear();
+    inspect_info_list.clear();
+    to_remove.clear();
 
     for (;;) {
         if (clock::now() - start >= network_channel.duration) break;
         NetworkInfo? info = get_process_info(network_channel);
         if (catch info) continue;
     }
-
-    List{Socket} sockets_list;
-    sockets_list.init(&network_channel.libc);
-    defer sockets_list.free();
-
-    List{TrafficStats} traffic_stats_list;
-    traffic_stats_list.init(&network_channel.libc);
-    defer traffic_stats_list.free();
-
-    List{InspectInformation} inspect_info_list;
-    inspect_info_list.init(&network_channel.libc);
-    defer inspect_info_list.free();
 
     foreach (sock : network_channel.sock_map.value_iter()) {
         ulong sent = lookup_bytes(network_channel.network_stats.sent, sock.sock_cookie);
@@ -368,9 +365,9 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel) {
 
     NetworkSnapshot ns = {
         .app = network_channel.app_map,
-        .sock = sockets_list,
-        .traffic_stats = traffic_stats_list,
-        .information = inspect_info_list,
+        .sock = *sockets_list,
+        .traffic_stats = *traffic_stats_list,
+        .information = *inspect_info_list,
     };
 
     if (!@ok(network_channel.snapshot_channel.try_push(ns))) {
@@ -399,8 +396,30 @@ struct NetworkSnapshot {
 }
 
 fn void? snapshot_loop(NetworkChannel* network_channel) {
+    List{Socket} sockets_list;
+    sockets_list.init(&network_channel.libc);
+    defer sockets_list.free();
+
+    List{TrafficStats} traffic_stats_list;
+    traffic_stats_list.init(&network_channel.libc);
+    defer traffic_stats_list.free();
+
+    List{InspectInformation} inspect_info_list;
+    inspect_info_list.init(&network_channel.libc);
+    defer inspect_info_list.free();
+
+    List{ulong} to_remove;
+    to_remove.init(&network_channel.libc);
+    defer to_remove.free();
+
     for (;;) {
-        if (catch collect_network_snapshot(network_channel)) return;
+        if (catch collect_network_snapshot(
+            network_channel,
+            &sockets_list,
+            &traffic_stats_list,
+            &inspect_info_list,
+            &to_remove,
+        )) return;
     }
 }
 
