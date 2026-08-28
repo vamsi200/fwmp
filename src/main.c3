@@ -42,10 +42,8 @@ int g_sock_idx = 0;
 fn void poll_snapshot(NetworkChannel* channel) {
     NetworkSnapshot? snap = channel.snapshot_channel.try_pop();
     if (try snap) {
-        if (snap.app.len() > 0) {
-            g_snapshot = snap;
-            g_has_snapshot = true;
-        }
+        g_snapshot = snap;
+        g_has_snapshot = true;
     }
 }
 
@@ -216,7 +214,7 @@ fn void layout(NetworkChannel* channel) {
                         == SocketState.ESTABLISHED ? "ESTB" : "TWAIT"; // TODO: Change this
                     String label = string::tformat(
                         "%s:%d  %s",
-                        fetch::convert_ip(&channel.libc, 2, s.identity.remote.addr),
+                        fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
                         s.identity.remote.port,
                         state_short
                     );
@@ -241,7 +239,7 @@ fn void layout(NetworkChannel* channel) {
                         "remote    ",
                         string::tformat(
                             "%s:%d",
-                            fetch::convert_ip(&channel.libc, 2, sock.identity.remote.addr),
+                            fetch::convert_ip(&channel.libc, sock.identity.family, sock.identity.remote.addr),
                             sock.identity.remote.port
                         ),
                         true
@@ -568,6 +566,7 @@ fn void main(String[] args) {
     nc.app_map = app_map;
     nc.sock_map = sock_map;
     nc.next_app_id = 0;
+    nc.retention = (NanoDuration)10_000;
 
     t_3.create((ThreadFn)&init_ui, &nc)!!;
     t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;

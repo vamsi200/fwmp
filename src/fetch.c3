@@ -16,15 +16,11 @@ struct Application {
 }
 
 fn uint Application.hash(Application self) {
-    uint h = self.name.hash();
-    uint e = self.executable.hash();
-    h ^= e;
-
-    return h;
+    return self.executable.hash();
 }
 
 fn bool Application.equals(Application self, Application other) {
-    return self.name == other.name && self.executable == other.executable;
+    return self.executable == other.executable;
 }
 
 enum EventType {
@@ -65,6 +61,7 @@ struct Socket {
 
     ulong app_id;
     uint pid;
+    Clock last_seen;
 }
 
 
@@ -87,6 +84,7 @@ struct SocketIdentity {
     Endpoint local;
     Endpoint remote;
     Protocol protocol;
+    char family;
 }
 
 struct Endpoint {
@@ -185,6 +183,7 @@ struct NetworkChannel {
     HashMap{Application, ulong} app_map;
     HashMap{ulong, Socket} sock_map;
     ulong next_app_id;
+    NanoDuration retention;
 }
 
 fn ulong lookup_bytes(BpfMap* map, ulong cookie) {
@@ -258,8 +257,10 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
         if (catch ev) return EVENT_NOT_FOUND_ERROR~;
 
         if (ev.event_type == EventType.CLOSE) {
-            recv.sock_map.remove(ev.sock_cookie);
-            return EVENT_NOT_FOUND_ERROR~;
+            Socket? existing = recv.sock_map.get(ev.sock_cookie);
+            if (catch existing) return EVENT_NOT_FOUND_ERROR~;
+            existing.state = SocketState.CLOSE;
+            existing.last_seen = clock::now();
         }
 
         ProcessInfo pi  = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
@@ -269,20 +270,29 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
         if (recv.app_map.has_key(app)) {
             app_id = recv.app_map.get(app)!!;
         } else {
-            recv.next_app_id += 1;
-            app_id = recv.next_app_id;
-            recv.app_map.set(app, app_id);
+            io::printfn("inserted: %s = %s", app.name, app.executable);
+            if (app.executable.len > 0) {
+                recv.next_app_id += 1;
+                app_id = recv.next_app_id;
+                recv.app_map.set(app, app_id);
+            }
         }
 
-        Endpoint local          = { .addr = ev.local_addr, .port = ev.local_port };
-        Endpoint remote         = { .addr = ev.remote_addr, .port = ev.remote_port };
-        SocketIdentity identity = { .local = local, .remote = remote, .protocol = Protocol.TCP };
+        Endpoint local  = { .addr = ev.local_addr, .port = ev.local_port };
+        Endpoint remote = { .addr = ev.remote_addr, .port = ev.remote_port };
+        SocketIdentity identity = {
+            .local = local,
+            .remote = remote,
+            .protocol = Protocol.TCP,
+            .family = ev.family
+        };
         Socket new_socket = {
             .identity = identity,
             .state = SocketState.ESTABLISHED,
             .sock_cookie = ev.sock_cookie,
             .app_id = app_id,
             .pid = (uint)ev.pid,
+            .last_seen = clock::now(),
         };
         recv.sock_map.set(ev.sock_cookie, new_socket);
 
@@ -294,6 +304,11 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
 
 fn void? collect_network_snapshot(NetworkChannel* network_channel) {
     Clock start = clock::now();
+
+    List{ulong} to_remove;
+    to_remove.init(&network_channel.libc);
+    defer to_remove.free();
+
     for (;;) {
         if (clock::now() - start >= network_channel.duration) break;
         NetworkInfo? info = get_process_info(network_channel);
@@ -303,22 +318,18 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel) {
     List{Socket} sockets_list;
     sockets_list.init(&network_channel.libc);
     defer sockets_list.free();
+
     List{TrafficStats} traffic_stats_list;
     traffic_stats_list.init(&network_channel.libc);
     defer traffic_stats_list.free();
+
     List{InspectInformation} inspect_info_list;
     inspect_info_list.init(&network_channel.libc);
     defer inspect_info_list.free();
 
     foreach (sock : network_channel.sock_map.value_iter()) {
-        ulong sent                 = lookup_bytes(
-            network_channel.network_stats.sent,
-            sock.sock_cookie
-        );
-        ulong recv                 = lookup_bytes(
-            network_channel.network_stats.recv,
-            sock.sock_cookie
-        );
+        ulong sent = lookup_bytes(network_channel.network_stats.sent, sock.sock_cookie);
+        ulong recv = lookup_bytes(network_channel.network_stats.recv, sock.sock_cookie);
         TrafficStats traffic_stats = {
             .sock_cookie = sock.sock_cookie,
             .sent = sent,
@@ -338,6 +349,18 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel) {
         sockets_list.push(sock);
         traffic_stats_list.push(traffic_stats);
         inspect_info_list.push(inspect_info);
+    }
+
+    foreach (sock : network_channel.sock_map.value_iter()) {
+        if (sock.state == SocketState.CLOSE
+            && clock::now() - sock.last_seen >= network_channel.retention) {
+            to_remove.push(sock.sock_cookie);
+        }
+    }
+
+    foreach (cookie : to_remove) {
+        io::printfn("removing sock_cookie: %d", cookie);
+        network_channel.sock_map.remove(cookie);
     }
 
     NetworkSnapshot ns = {
