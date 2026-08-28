@@ -62,7 +62,7 @@ fn void row_text(String text, bool active, bool warn) {
         {
             .layout = {
                 .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(18) },
-                .padding = padding_xy(4, 2),
+                .padding = padding_xy(10, 2),
             },
             .background_color = active ? COLOR_ACTIVE_BG : COLOR_NONE,
         }
@@ -92,8 +92,28 @@ fn void inspect_line(String label, String value, bool highlight) {
     };
 }
 
+fn void row_text_id(clay::ClayElementId id, String text, bool active, bool warn) {
+    clay::ClayColor color = active ? COLOR_ACTIVE_TX : (warn ? COLOR_WARN : COLOR_DIM);
+    clay::@ui_with_id(
+        id,
+        {
+            .layout = {
+                .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(18) },
+                .padding = padding_xy(4, 4),
+            },
+            .background_color = active ? COLOR_ACTIVE_BG : COLOR_NONE,
+        }
+    ) {
+        clay::@text(cstr(text), text_cfg(color));
+    };
+}
 
-fn void layout(NetworkChannel* channel) {
+fn String copy_da_string(String str, Allocator allocator) {
+    if (str.ptr == null || str.len == 0) return "";
+    return str.copy(allocator);
+}
+
+fn void layout(NetworkChannel* channel, bool mouse_clicked) {
     poll_snapshot(channel);
     if (!g_has_snapshot) {
         // TODO: draw a "waiting for data" placeholder panel and return
@@ -143,7 +163,7 @@ fn void layout(NetworkChannel* channel) {
             .layout = {
                 .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                 .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
-                .padding = clay::padding_all(15),
+                .padding = clay::padding_all(10),
                 .child_gap = 10,
             },
             .background_color = COLOR_BG,
@@ -159,7 +179,7 @@ fn void layout(NetworkChannel* channel) {
                 },
             }
         ) {
-            clay::@text(clay::@string("fwmp v0.1 — clay/gui"), text_cfg(COLOR_DIM));
+            clay::@text(clay::@string("fwmp"), text_cfg(COLOR_DIM));
         };
 
         clay::@ui_with_id(
@@ -188,39 +208,53 @@ fn void layout(NetworkChannel* channel) {
             ) {
                 panel_header("apps");
                 for (int i = 0; i < g_app_count; i++) {
-                    row_text(g_app_list[i].name, i == g_app_idx, false);
+                    clay::ClayElementId id = clay::@id_i("app-row", (uint)i);
+                    row_text_id(id, g_app_list[i].name, i == g_app_idx, false);
+                    if (mouse_clicked && clay::pointer_over(id)) {
+                        g_app_idx = i;
+                        g_sock_idx = 0;
+                    }
                 }
             };
 
             // sockets column
-            clay::@ui_with_id(
-                clay::@id("col-sockets"),
+            clay::ClayElementId sockets_id = clay::@id("col-sockets");
+            clay::_open_element_with_id(sockets_id);
+            clay::ClayVector2 scroll_offset = clay::get_scroll_offset();
+            clay::_configure_open_element(
                 {
                     .layout = {
                         .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                         .sizing = {
-                            .width = clay::sizing_fixed(260),
+                            .width = clay::sizing_fixed(420),
                             .height = clay::sizing_grow()
                         },
+                        .child_gap = 10,
                     },
                     .border = { .color = COLOR_BORDER, .width = { .right = 1 } },
+                    .clip = { .vertical = true, .child_offset = scroll_offset },
                 }
-            ) {
-                String app_name = g_app_count > 0 ? g_app_list[g_app_idx].name : "—";
-                panel_header(string::tformat("sockets [%s]", app_name));
-                for (int i = 0; i < g_sock_count; i++) {
-                    Socket s = g_sock_list[i];
-                    String state_short = s.state
-                        == SocketState.ESTABLISHED ? "ESTB" : "TWAIT"; // TODO: Change this
-                    String label = string::tformat(
-                        "%s:%d  %s",
-                        fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
-                        s.identity.remote.port,
-                        state_short
-                    );
-                    row_text(label, i == g_sock_idx, s.state != SocketState.ESTABLISHED);
+            );
+
+            String app_name = g_app_count > 0 ? g_app_list[g_app_idx].name : "—";
+            panel_header(string::tformat("sockets [%s]", app_name));
+            for (int i = 0; i < g_sock_count; i++) {
+                Socket s           = g_sock_list[i];
+                String state_short = s.state == SocketState.ESTABLISHED ? "ESTB" : "TWAIT";
+                String label = string::tformat(
+                    "%s:%d  %s",
+                    fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
+                    s.identity.remote.port,
+                    state_short
+                );
+                clay::ClayElementId id = clay::@id_i("sock-row", (uint)i);
+                row_text_id(id, label, i == g_sock_idx, s.state != SocketState.ESTABLISHED);
+                if (mouse_clicked && clay::pointer_over(id)) {
+                    g_sock_idx = i;
                 }
-            };
+            }
+
+            clay::_close_element();
 
             // inspect column
             clay::@ui_with_id(
@@ -239,7 +273,11 @@ fn void layout(NetworkChannel* channel) {
                         "remote    ",
                         string::tformat(
                             "%s:%d",
-                            fetch::convert_ip(&channel.libc, sock.identity.family, sock.identity.remote.addr),
+                            fetch::convert_ip(
+                                &channel.libc,
+                                sock.identity.family,
+                                sock.identity.remote.addr
+                            ),
                             sock.identity.remote.port
                         ),
                         true
@@ -253,20 +291,20 @@ fn void layout(NetworkChannel* channel) {
                         ),
                         false
                     );
-                    if (info) {
-                        inspect_line("host      ", info.hostname, false);
-                        inspect_line("cname     ", info.cname, false);
-                        inspect_line("pid       ", string::tformat("%d", info.pid), false);
-                    }
+                  if (info) {
+                      inspect_line("host      ", copy_da_string(info.hostname, &channel.libc), false);
+                      inspect_line("cname     ", copy_da_string(info.cname, &channel.libc), false);
+                      inspect_line("pid       ", string::tformat("%d", info.pid), false);
+                  }
                     if (stats) {
                         inspect_line(
                             "sent      ",
-                            string::tformat("%dKB", stats.sent / 1024),
+                            string::tformat("%d KB", stats.sent / 1024),
                             false
                         );
                         inspect_line(
                             "recv      ",
-                            string::tformat("%dKB", stats.received / 1024),
+                            string::tformat("%d KB", stats.received / 1024),
                             false
                         );
                     }
@@ -293,8 +331,8 @@ fn void layout(NetworkChannel* channel) {
             }
         ) {
             clay::@text(
-                clay::@string("up/down apps   tab sockets   enter inspect   r reroll   / filter"),
-                text_cfg(COLOR_DIM, 13)
+                clay::@string("[up/down] apps   [tab] sockets   [enter] inspect   [/] filter"),
+                text_cfg(COLOR_DIM, 20)
             );
         };
     };
@@ -438,6 +476,37 @@ fn void init_ui(NetworkChannel* channel) {
                 if (g_sock_count > 0) g_sock_idx = (g_sock_idx + 1) % g_sock_count;
             }
 
+            static float g_pressed_at = 0;
+            const float GG_TIMEOUT = 0.4f;
+            static bool g_pressed_once = false;
+
+            if (rl::is_key_pressed(rl::RLKeyboardKey.G)) {
+                bool shift = rl::is_key_down(rl::RLKeyboardKey.LEFT_SHIFT) || rl::is_key_down(rl::RLKeyboardKey.RIGHT_SHIFT);
+                if (shift) {
+                    if (g_sock_count > 0) g_sock_idx = g_sock_count - 1;
+                    g_pressed_once = false;
+                } else if (g_pressed_once && (rl::get_time() - g_pressed_at) < GG_TIMEOUT) {
+                    g_sock_idx = 0;
+                    g_pressed_once = false;
+                } else {
+                    g_pressed_once = true;
+                    g_pressed_at = (float)rl::get_time();
+                }
+            }
+
+
+            rl::RLVector2 mouse_pos = rl::get_mouse_position();
+            bool mouse_down         = rl::is_mouse_button_down(rl::RLMouseButton.LEFT);
+            bool mouse_clicked      = rl::is_mouse_button_pressed(rl::RLMouseButton.LEFT);
+            clay::set_pointer_state({ mouse_pos.x, mouse_pos.y }, mouse_down);
+
+            float wheel_y = rl::get_mouse_wheel_move();
+            clay::update_scroll_containers(false, { 0, wheel_y }, rl::get_frame_time());
+
+            if (wheel_y != 0 && g_sock_count > 0) {
+                g_sock_idx = math::clamp(g_sock_idx - (int)wheel_y, 0, g_sock_count - 1);
+            }
+
             clay::set_layout_dimensions(
                 {
                     .width = (float)rl::get_screen_width(),
@@ -446,7 +515,7 @@ fn void init_ui(NetworkChannel* channel) {
             );
 
             clay::begin_layout();
-            layout(channel);
+            layout(channel, mouse_clicked);
             clay::ClayRenderCommandArray cmds = clay::end_layout(rl::get_frame_time());
 
             rl::begin_drawing();

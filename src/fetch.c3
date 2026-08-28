@@ -251,8 +251,8 @@ struct NetworkInfo {
 }
 
 fn NetworkInfo? get_process_info(NetworkChannel* recv) {
-    NetworkInfo ni = { };
     @pool_init(&recv.libc, 8192) {
+        NetworkInfo ni = { };
         Event? ev = recv.channel.try_pop();
         if (catch ev) return EVENT_NOT_FOUND_ERROR~;
 
@@ -264,14 +264,17 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
         }
 
         ProcessInfo pi  = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
-        Application app = { .name = pi.process.name, .executable = pi.exe_path };
+        Application app = {
+            .name = pi.process.name,
+            .executable = pi.exe_path,
+        };
 
         ulong app_id;
         if (recv.app_map.has_key(app)) {
             app_id = recv.app_map.get(app)!!;
         } else {
-            io::printfn("inserted: %s = %s", app.name, app.executable);
             if (app.executable.len > 0) {
+                io::printfn("inserted: %s = %s", app.name, app.executable);
                 recv.next_app_id += 1;
                 app_id = recv.next_app_id;
                 recv.app_map.set(app, app_id);
@@ -369,6 +372,7 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel) {
         .traffic_stats = traffic_stats_list,
         .information = inspect_info_list,
     };
+
     if (!@ok(network_channel.snapshot_channel.try_push(ns))) {
         io::printn("failed to send snapshot");
     }
