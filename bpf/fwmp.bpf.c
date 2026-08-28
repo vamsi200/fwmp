@@ -33,6 +33,7 @@ struct event {
   __u64 timestamp_ns;
   enum event_type type;
   __u64 sock_cookie;
+  __u8 state;
 };
 
 struct {
@@ -98,6 +99,7 @@ int BPF_PROG(tcp_v4_connect_exit, struct sock *sk, struct sockaddr *uaddr,
 
   __u64 pid_tgid = bpf_get_current_pid_tgid();
 
+  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
   event->pid = pid_tgid >> 32;
   event->tid = (__u32)pid_tgid;
 
@@ -143,6 +145,7 @@ int BPF_PROG(tcp_v6_connect_exit, struct sock *sk, struct sockaddr *uaddr,
   event->tid = (__u32)pid_tgid;
 
   event->timestamp_ns = bpf_ktime_get_ns();
+  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
 
   event->family = AF_INET6;
   event->protocol = IPPROTO_TCP;
@@ -181,6 +184,8 @@ int BPF_PROG(inet_csk_accept, struct sock *sk, struct proto_accept_arg *arg,
   event->timestamp_ns = bpf_ktime_get_ns();
   __u16 family = BPF_CORE_READ(retval, __sk_common.skc_family);
   event->family = (__u8)family;
+  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
+
   event->protocol = IPPROTO_TCP;
   if (family == AF_INET) {
     __u32 local_addr = BPF_CORE_READ(retval, __sk_common.skc_rcv_saddr);
@@ -217,6 +222,7 @@ int BPF_PROG(inet_bind, struct socket *sock, struct sockaddr *uaddr,
 
   __u64 pid_tgid = bpf_get_current_pid_tgid();
 
+  event->state = BPF_CORE_READ(sock, sk, __sk_common.skc_state);
   event->pid = pid_tgid >> 32;
   event->tid = (__u32)pid_tgid;
   event->timestamp_ns = bpf_ktime_get_ns();
@@ -271,6 +277,7 @@ int BPF_PROG(inet_listen, struct socket *sock, int backlog, int retval) {
   event->timestamp_ns = bpf_ktime_get_ns();
 
   __u16 family = BPF_CORE_READ(sock, sk, __sk_common.skc_family);
+  event->state = BPF_CORE_READ(sock, sk, __sk_common.skc_state);
 
   event->family = (__u8)family;
   event->protocol = IPPROTO_TCP;
@@ -317,6 +324,7 @@ int BPF_PROG(tcp_close, struct sock *sk, long int timeout) {
 
   event->family = AF_INET;
   event->protocol = 6;
+  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
 
   __u32 local_addr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
 
