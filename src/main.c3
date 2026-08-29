@@ -53,6 +53,13 @@ int g_sock_idx = 0;
 fn void poll_snapshot(NetworkChannel* channel) {
     NetworkSnapshot? snap = channel.snapshot_channel.try_pop();
     if (try snap) {
+        if (g_has_snapshot) {
+            // g_snapshot.app.free();
+
+            g_snapshot.sock.free();
+            g_snapshot.traffic_stats.free();
+            g_snapshot.information.free();
+        }
         g_snapshot = snap;
         g_has_snapshot = true;
     }
@@ -447,7 +454,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
 
                 String addr = string::tformat(
                     "[%s]:%d",
-                    fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
+                    fetch::convert_ip(tmem, s.identity.family, s.identity.remote.addr),
                     s.identity.remote.port
                 );
                 clay::@text(
@@ -515,7 +522,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                             string::tformat(
                                 "[%s]:%d",
                                 fetch::convert_ip(
-                                    &channel.libc,
+                                    tmem,
                                     sock.identity.family,
                                     sock.identity.remote.addr
                                 ),
@@ -618,13 +625,14 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             footer_key("/", " filter", 4);
         };
     };
+
 }
 
 fn clay::ClayDimensions measure_text(
     clay::ClayStringSlice text,
     clay::ClayTextElementConfig* config,
     void* user_data
-) {
+) => @pool() {
     String s        = (String)text.chars[:text.length];
     ZString z       = s.zstr_tcopy();
     rl::RLFont font = g_font;
@@ -639,7 +647,7 @@ fn clay::ClayDimensions measure_text(
 
 fn rl::RLColor to_rl_color(clay::ClayColor c) => { (char)c.r, (char)c.g, (char)c.b, (char)c.a };
 
-fn void clay_raylib_render(clay::ClayRenderCommandArray* commands) {
+fn void clay_raylib_render(clay::ClayRenderCommandArray* commands) => @pool() {
     for (int i = 0; i < commands.length; i++) {
         clay::ClayRenderCommand* cmd = clay::render_command_array_get(commands, i);
         clay::ClayBoundingBox bb     = cmd.bounding_box;
@@ -747,6 +755,7 @@ fn void init_ui(NetworkChannel* channel) {
 
         bool quit = false;
         while (!rl::window_should_close() && !quit) {
+          @pool() {
             if (rl::is_key_pressed(rl::RLKeyboardKey.Q)) {
                 quit = true;
             }
@@ -824,7 +833,9 @@ fn void init_ui(NetworkChannel* channel) {
             rl::clear_background(rl::BLACK);
             clay_raylib_render(&cmds);
             rl::end_drawing();
+          };
         }
+
     };
 }
 
@@ -836,8 +847,8 @@ fn void main(String[] args) {
     LibcAllocator libc;
 
     nc.libc = libc;
-    nc.channel = channel::create_buffered(&libc, 1024 * 1024)!!;
-    nc.snapshot_channel = channel::create_buffered(&libc, 1024 * 1024)!!;
+    nc.channel = channel::create_buffered(&libc, 1024)!!;
+    nc.snapshot_channel = channel::create_buffered(&libc, 1024)!!;
 
     defer nc.channel.destroy();
     defer nc.snapshot_channel.destroy();
@@ -955,4 +966,5 @@ fn void main(String[] args) {
     libbpf::bpf_object__close(obj);
 
     nc.channel.close();
+    nc.snapshot_channel.close();
 }

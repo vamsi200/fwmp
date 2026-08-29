@@ -306,18 +306,21 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             .name = pi.process.name.copy(&recv.libc),
             .executable = pi.exe_path.copy(&recv.libc),
         };
-        defer pi.free(&recv.libc);
+
+        pi.free(&recv.libc);
 
         ulong app_id;
         if (recv.app_map.has_key(app)) {
             app_id = recv.app_map.get(app)!!;
+            app.name.free(&recv.libc);
+            app.executable.free(&recv.libc);
+        } else if (app.executable.len > 0) {
+            recv.next_app_id += 1;
+            app_id = recv.next_app_id;
+            recv.app_map.set(app, app_id);
         } else {
-            if (app.executable.len > 0) {
-                io::printfn("inserted: %s = %s", app.name, app.executable);
-                recv.next_app_id += 1;
-                app_id = recv.next_app_id;
-                recv.app_map.set(app, app_id);
-            }
+            app.name.free(&recv.libc);
+            app.executable.free(&recv.libc);
         }
 
         Endpoint local  = { .addr = ev.local_addr, .port = ev.local_port };
@@ -344,10 +347,10 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
         return ni;
     };
 }
-//
+
 // typedef SockAddrPtr = void*;
 // const NI_MAXHOST = 1000;
-//
+// 
 // extern fn CInt getnameinfo(
 //     SockAddrPtr sa,
 //     Socklen_t salen,
@@ -357,7 +360,7 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
 //     Socklen_t servlen,
 //     CInt flags
 // ) @cname("getnameinfo");
-//
+// 
 // fn SockAddrPtr build_sockaddr(char[] addr_bytes, ushort family) @if(os::SUPPORTS_INET) => @pool() {
 //     if (family == AF_INET) {
 //         SockAddrIn* sa = mem::tnew(SockAddrIn);
@@ -365,17 +368,17 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
 //         mem::copy(&sa.sin_addr, addr_bytes.ptr, 4);
 //         return (SockAddrPtr)sa;
 //     }
-//
+// 
 //     SockAddrIn6* sa6 = mem::tnew(SockAddrIn6);
 //     *sa6 = { .sin6_family = AF_INET6 };
 //     mem::copy(&sa6.sin6_addr, addr_bytes.ptr, 16);
 //     return (SockAddrPtr)sa6;
 // }
-//
+// 
 // fn Socklen_t sockaddr_len(ushort family) {
 //     return family == AF_INET ? SockAddrIn::size : SockAddrIn6::size;
 // }
-//
+// 
 // fn String? nameinfo(char[] addr_bytes, ushort family, LibcAllocator alloc) @if(os::SUPPORTS_INET) {
 //     @pool_init(&alloc, 256) {
 //         char[NI_MAXHOST] host_buf;
