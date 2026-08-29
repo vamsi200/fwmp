@@ -6,6 +6,7 @@ import std::collections::list;
 import std::collections::map;
 import std::thread::channel;
 import std::time;
+import std::net::os;
 
 const ushort AF_INET  = 2;
 const ushort AF_INET6 = 10;
@@ -245,7 +246,7 @@ fn void fetch_data_from_ebpf(NetworkChannel* nc) {
     };
 }
 
-faultdef EVENT_NOT_FOUND_ERROR, EXISTING_SOCKET;
+faultdef EVENT_NOT_FOUND_ERROR, EXISTING_SOCKET, NO_PTR_RECORD_ERROR, NAMEINFO_FAILED;
 
 struct NetworkInfo {
     Event event;
@@ -287,7 +288,7 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
         Event? ev      = recv.channel.try_pop();
         if (catch ev) return EVENT_NOT_FOUND_ERROR~;
 
-        if (ev.event_type == EventType.CLOSE || ev.event_type == EventType.STATE_CHANGE) {
+        if (ev.event_type == EventType.STATE_CHANGE) {
             Socket? existing = recv.sock_map.get(ev.sock_cookie);
             if (catch existing) return EVENT_NOT_FOUND_ERROR~;
 
@@ -297,7 +298,6 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             recv.sock_map.set(ev.sock_cookie, existing);
 
             ni.event = ev;
-            io::printn("returning");
             return ni;
         }
 
@@ -344,19 +344,59 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
         return ni;
     };
 }
+//
+// typedef SockAddrPtr = void*;
+// const NI_MAXHOST = 1000;
+//
+// extern fn CInt getnameinfo(
+//     SockAddrPtr sa,
+//     Socklen_t salen,
+//     ZString host,
+//     Socklen_t hostlen,
+//     ZString serv,
+//     Socklen_t servlen,
+//     CInt flags
+// ) @cname("getnameinfo");
+//
+// fn SockAddrPtr build_sockaddr(char[] addr_bytes, ushort family) @if(os::SUPPORTS_INET) => @pool() {
+//     if (family == AF_INET) {
+//         SockAddrIn* sa = mem::tnew(SockAddrIn);
+//         *sa = { .sin_family = AF_INET };
+//         mem::copy(&sa.sin_addr, addr_bytes.ptr, 4);
+//         return (SockAddrPtr)sa;
+//     }
+//
+//     SockAddrIn6* sa6 = mem::tnew(SockAddrIn6);
+//     *sa6 = { .sin6_family = AF_INET6 };
+//     mem::copy(&sa6.sin6_addr, addr_bytes.ptr, 16);
+//     return (SockAddrPtr)sa6;
+// }
+//
+// fn Socklen_t sockaddr_len(ushort family) {
+//     return family == AF_INET ? SockAddrIn::size : SockAddrIn6::size;
+// }
+//
+// fn String? nameinfo(char[] addr_bytes, ushort family, LibcAllocator alloc) @if(os::SUPPORTS_INET) {
+//     @pool_init(&alloc, 256) {
+//         char[NI_MAXHOST] host_buf;
+//         SockAddrPtr sa = build_sockaddr(addr_bytes, family);
+//         if (getnameinfo(sa, sockaddr_len(family), (ZString)&host_buf, NI_MAXHOST, null, 0, 0)) {
+//             return NAMEINFO_FAILED~;
+//         }
+//         return ((ZString)&host_buf).str_view();
+//     };
+// }
 
-fn void? collect_network_snapshot(
-    NetworkChannel* network_channel,
-    List{Socket}* sockets_list,
-    List{TrafficStats}* traffic_stats_list,
-    List{InspectInformation}* inspect_info_list,
-    List{ulong}* to_remove
-) {
+fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* to_remove) {
     Clock start = clock::now();
 
-    sockets_list.clear();
-    traffic_stats_list.clear();
-    inspect_info_list.clear();
+    List{Socket} sockets_list;
+    sockets_list.init(&network_channel.libc);
+    List{TrafficStats} traffic_stats_list;
+    traffic_stats_list.init(&network_channel.libc);
+    List{InspectInformation} inspect_info_list;
+    inspect_info_list.init(&network_channel.libc);
+
     to_remove.clear();
 
     for (;;) {
@@ -368,22 +408,25 @@ fn void? collect_network_snapshot(
     foreach (sock : network_channel.sock_map.value_iter()) {
         ulong sent = lookup_bytes(network_channel.network_stats.sent, sock.sock_cookie);
         ulong recv = lookup_bytes(network_channel.network_stats.recv, sock.sock_cookie);
+
         TrafficStats traffic_stats = {
             .sock_cookie = sock.sock_cookie,
             .sent = sent,
             .received = recv
         };
+
         InspectInformation inspect_info = {
             .remote_addr = sock.identity.remote.addr,
             .local_addr = sock.identity.local.addr,
             .local_port = sock.identity.local.port,
             .remote_port = sock.identity.remote.port,
-            .hostname = "test",
+            .hostname = "",
             .cname = "test",
             .pid = sock.pid,
             .sock_state = sock.state,
             .traffic_stats = traffic_stats,
         };
+
         sockets_list.push(sock);
         traffic_stats_list.push(traffic_stats);
         inspect_info_list.push(inspect_info);
@@ -397,22 +440,20 @@ fn void? collect_network_snapshot(
     }
 
     foreach (cookie : to_remove) {
-        io::printfn("removing sock_cookie: %d", cookie);
         network_channel.sock_map.remove(cookie);
     }
 
     NetworkSnapshot ns = {
         .app = network_channel.app_map,
-        .sock = *sockets_list,
-        .traffic_stats = *traffic_stats_list,
-        .information = *inspect_info_list,
+        .sock = sockets_list,
+        .traffic_stats = traffic_stats_list,
+        .information = inspect_info_list,
     };
 
     if (!@ok(network_channel.snapshot_channel.try_push(ns))) {
         io::printn("failed to send snapshot");
     }
 }
-
 // TODO: Update later
 struct InspectInformation {
     char[16] remote_addr;
@@ -434,30 +475,12 @@ struct NetworkSnapshot {
 }
 
 fn void? snapshot_loop(NetworkChannel* network_channel) {
-    List{Socket} sockets_list;
-    sockets_list.init(&network_channel.libc);
-    defer sockets_list.free();
-
-    List{TrafficStats} traffic_stats_list;
-    traffic_stats_list.init(&network_channel.libc);
-    defer traffic_stats_list.free();
-
-    List{InspectInformation} inspect_info_list;
-    inspect_info_list.init(&network_channel.libc);
-    defer inspect_info_list.free();
-
     List{ulong} to_remove;
     to_remove.init(&network_channel.libc);
     defer to_remove.free();
 
     for (;;) {
-        if (catch collect_network_snapshot(
-            network_channel,
-            &sockets_list,
-            &traffic_stats_list,
-            &inspect_info_list,
-            &to_remove,
-        )) return;
+        if (catch collect_network_snapshot(network_channel, &to_remove)) return;
     }
 }
 

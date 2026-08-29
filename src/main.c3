@@ -21,6 +21,17 @@ const clay::ClayColor COLOR_ACTIVE_TX = { 234, 255, 156, 255 };
 const clay::ClayColor COLOR_WARN      = { 224, 169, 76, 255 };
 const clay::ClayColor COLOR_NONE      = { 0, 0, 0, 0 };
 
+const clay::ClayColor COLOR_ACCENT      = { 100, 181, 246, 255 };
+const clay::ClayColor COLOR_GREEN       = { 76, 175, 80, 255 };
+const clay::ClayColor COLOR_YELLOW      = { 255, 220, 79, 255 };
+const clay::ClayColor COLOR_BLUE        = { 66, 165, 245, 255 };
+const clay::ClayColor COLOR_SELECTED    = { 100, 181, 246, 38 };
+const clay::ClayColor COLOR_HOVER       = { 255, 255, 255, 20 };
+const clay::ClayColor COLOR_CARD_BG     = { 255, 255, 255, 8 };
+const clay::ClayColor COLOR_KEY_BG      = { 255, 255, 255, 20 };
+const clay::ClayColor COLOR_BADGE_BG    = { 255, 255, 255, 20 };
+const clay::ClayColor COLOR_TRANSPARENT = { 0, 0, 0, 0 };
+
 RLFont g_font;
 
 const int MAX_APPS  = 32;
@@ -150,6 +161,46 @@ fn String get_state(SocketState state) {
     }
 }
 
+fn ClayColor get_state_color(SocketState state) {
+    switch (state) {
+        case SocketState.ESTABLISHED:
+            return COLOR_GREEN;
+        case SocketState.TIME_WAIT:
+        case SocketState.FIN_WAIT1:
+        case SocketState.FIN_WAIT2:
+            return COLOR_WARN;
+        case SocketState.SYN_SENT:
+        case SocketState.SYN_RECV:
+            return COLOR_ACCENT;
+        case SocketState.LISTEN:
+            return COLOR_BLUE;
+        case SocketState.CLOSE:
+        case SocketState.CLOSE_WAIT:
+        case SocketState.LAST_ACK:
+        case SocketState.CLOSING:
+            return COLOR_DIM;
+        default:
+            return COLOR_DIM;
+    }
+}
+
+macro void footer_key(String key, String action, uint index) {
+    clay::@ui_with_id(
+        clay::@id_i("footer-key", index),
+        {
+            .layout = {
+                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                .sizing = { .width = clay::sizing_fixed(0), .height = clay::sizing_fixed(0) },
+                .padding = { .left = 0, .right = 0, .top = 0, .bottom = 0 },
+                .child_gap = 4,
+            },
+        }
+    ) {
+        clay::@text(clay::@string(key), text_cfg(COLOR_TEXT, 20));
+        clay::@text(clay::@string(action), text_cfg(COLOR_DIM, 20));
+    };
+}
+
 fn void layout(NetworkChannel* channel, bool mouse_clicked) {
     poll_snapshot(channel);
     if (!g_has_snapshot) {
@@ -211,23 +262,51 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             .layout = {
                 .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                 .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
-                .padding = clay::padding_all(10),
-                .child_gap = 10,
+                .padding = clay::padding_all(16),
+                .child_gap = 8,
             },
             .background_color = COLOR_BG,
+            .border = {
+                .color = COLOR_BORDER,
+                .width = { .left = 1, .right = 1, .top = 1, .bottom = 1, .between_children = 0 },
+            },
+            .corner_radius = {
+                .top_left = 8,
+                .top_right = 8,
+                .bottom_left = 8,
+                .bottom_right = 8
+            },
         }
     ) {
-        // titlebar
         clay::@ui_with_id(
             clay::@id("titlebar"),
             {
                 .layout = {
                     .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
-                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(24) },
+                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(28) },
+                    .padding = { .left = 0, .right = 0, .top = 0, .bottom = 6 },
+                    .child_alignment = {
+                        .x = clay::ClayLayoutAlignmentX.CENTER,
+                        .y = clay::ClayLayoutAlignmentY.CENTER
+                    },
                 },
+                .border = { .color = COLOR_BORDER, .width = { .bottom = 1 }, },
             }
         ) {
-            clay::@text(clay::@string("fwmp"), text_cfg(COLOR_DIM));
+            clay::@text(clay::@string("fwmp v0.1"), text_cfg(COLOR_DIM, 20));
+            clay::@ui_with_id(
+                clay::@id("title-spacer"),
+                {
+                    .layout = {
+                        .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                        .sizing = {
+                            .width = clay::sizing_grow(),
+                            .height = clay::sizing_fixed(0)
+                        },
+                    },
+                }
+            ) {
+            };
         };
 
         clay::@ui_with_id(
@@ -236,11 +315,10 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                 .layout = {
                     .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
                     .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
-                    .child_gap = 15,
+                    .child_gap = 0,
                 },
             }
         ) {
-            // apps column
             clay::@ui_with_id(
                 clay::@id("col-apps"),
                 {
@@ -250,55 +328,153 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                             .width = clay::sizing_fixed(160),
                             .height = clay::sizing_grow()
                         },
+                        .padding = { .left = 14, .right = 14, .top = 4, .bottom = 4 },
+                        .child_gap = 2,
                     },
-                    .border = { .color = COLOR_BORDER, .width = { .right = 1 } },
+                    .border = { .color = COLOR_BORDER, .width = { .right = 1 }, },
                 }
             ) {
-                panel_header("apps");
+                clay::@text(clay::@string("[ apps ]"), text_cfg(COLOR_DIM, 20));
+
+                clay::ClayElementId apps_list_id = clay::@id("apps-list");
+                clay::_open_element_with_id(apps_list_id);
+                clay::ClayVector2 scroll_offset = clay::get_scroll_offset();
+                clay::_configure_open_element(
+                    {
+                        .layout = {
+                            .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                            .sizing = {
+                                .width = clay::sizing_grow(),
+                                .height = clay::sizing_grow()
+                            },
+                            .child_gap = 0,
+                            .padding = { .top = 4, .bottom = 8 },
+                        },
+                        .clip = { .vertical = true, .child_offset = scroll_offset },
+                    }
+                );
+
                 for (int i = 0; i < g_app_count; i++) {
                     clay::ClayElementId id = clay::@id_i("app-row", (uint)i);
-                    row_text_id(id, g_app_list[i].name, i == g_app_idx, false);
+                    bool is_selected       = (i == g_app_idx);
+
+                    clay::_open_element_with_id(id);
+                    clay::_configure_open_element(
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                                .sizing = {
+                                    .width = clay::sizing_grow(),
+                                    .height = clay::sizing_fixed(22)
+                                },
+                                .padding = { .left = 4, .right = 4, .top = 2, .bottom = 2 },
+                                .child_gap = 4,
+                            },
+                            .background_color = is_selected ? COLOR_SELECTED : COLOR_TRANSPARENT,
+                        }
+                    );
+
+                    clay::@text(
+                        clay::@string(is_selected ? "* " : " "),
+                        text_cfg(is_selected ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
+                    );
+
+                    clay::@text(
+                        clay::@string(g_app_list[i].name),
+                        text_cfg(is_selected ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
+                    );
+
+                    clay::_close_element();
+
                     if (mouse_clicked && clay::pointer_over(id)) {
                         g_app_idx = i;
                         g_selected_app_id = g_app_ids[i];
                         g_sock_idx = 0;
                     }
                 }
+                clay::_close_element();
             };
 
-            // sockets column
             clay::ClayElementId sockets_id = clay::@id("col-sockets");
             clay::_open_element_with_id(sockets_id);
-            clay::ClayVector2 scroll_offset = clay::get_scroll_offset();
+            clay::ClayVector2 scroll_offset_socks = clay::get_scroll_offset();
             clay::_configure_open_element(
                 {
                     .layout = {
                         .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                         .sizing = {
-                            .width = clay::sizing_fixed(420),
+                            .width = clay::sizing_fixed(500),
                             .height = clay::sizing_grow()
                         },
-                        .child_gap = 10,
-                        .padding = { .left = 0, .right = 0, .top = 0, .bottom = 20 },
+                        .padding = { .left = 14, .right = 14, .top = 4, .bottom = 4 },
+                        .child_gap = 6,
                     },
-                    .border = { .color = COLOR_BORDER, .width = { .right = 1 } },
-                    .clip = { .vertical = true, .child_offset = scroll_offset },
+                    .border = { .color = COLOR_BORDER, .width = { .right = 1 }, },
+                    .clip = { .vertical = true, .child_offset = scroll_offset_socks },
                 }
             );
 
-            String app_name = g_app_count > 0 ? g_app_list[g_app_idx].name : "—";
-            panel_header(string::tformat("sockets [%s] (%d)", app_name, g_sock_count));
+            String app_name     = g_app_count > 0 ? g_app_list[g_app_idx].name : "—";
+            String header_title = string::tformat("[ sockets: %s (%d) ]", app_name, g_sock_count);
+            clay::@text(clay::@string(header_title), text_cfg(COLOR_DIM, 20));
+
             for (int i = 0; i < g_sock_count; i++) {
-                Socket s           = g_sock_list[i];
-                String state_short = get_state(s.state);
-                String label = string::tformat(
-                    "%s:%d  %s",
-                    fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
-                    s.identity.remote.port,
-                    state_short
-                );
+                Socket s               = g_sock_list[i];
                 clay::ClayElementId id = clay::@id_i("sock-row", (uint)i);
-                row_text_id(id, label, i == g_sock_idx, s.state != SocketState.ESTABLISHED);
+                bool is_selected       = (i == g_sock_idx);
+                bool is_established    = (s.state == SocketState.ESTABLISHED);
+
+                clay::_open_element_with_id(id);
+                clay::_configure_open_element(
+                    {
+                        .layout = {
+                            .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                            .sizing = {
+                                .width = clay::sizing_grow(),
+                                .height = clay::sizing_fixed(26)
+                            },
+                            .padding = { .left = 4, .right = 4, .top = 3, .bottom = 3 },
+                            .child_gap = 4,
+                        },
+                        .background_color = is_selected ? COLOR_SELECTED : COLOR_TRANSPARENT,
+                    }
+                );
+
+                clay::@text(
+                    clay::@string(is_selected ? "* " : " "),
+                    text_cfg(is_selected ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
+                );
+
+                String addr = string::tformat(
+                    "[%s]:%d",
+                    fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
+                    s.identity.remote.port
+                );
+                clay::@text(
+                    clay::@string(addr),
+                    text_cfg(is_selected ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
+                );
+
+                clay::@ui_with_id(
+                    clay::@id_i("sock-spacer", (uint)i),
+                    {
+                        .layout = {
+                            .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                            .sizing = {
+                                .width = clay::sizing_grow(),
+                                .height = clay::sizing_fixed(0)
+                            },
+                        },
+                    }
+                ) {
+                };
+
+                String state_short    = get_state(s.state);
+                ClayColor state_color = get_state_color(s.state);
+                clay::@text(clay::@string(state_short), text_cfg(state_color, 20));
+
+                clay::_close_element();
+
                 if (mouse_clicked && clay::pointer_over(id)) {
                     g_sock_idx = i;
                 }
@@ -306,92 +482,140 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
 
             clay::_close_element();
 
-            // inspect column
             clay::@ui_with_id(
                 clay::@id("col-inspect"),
                 {
                     .layout = {
                         .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                         .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_grow() },
+                        .padding = { .left = 14, .right = 14, .top = 4, .bottom = 4 },
                         .child_gap = 2,
                     },
                 }
             ) {
-                panel_header("inspect");
+                clay::@text(clay::@string("[ inspect ]"), text_cfg(COLOR_DIM, 20));
+
                 if (sock) {
-                    inspect_line(
-                        "remote    ",
-                        string::tformat(
-                            "%s:%d",
-                            fetch::convert_ip(
-                                &channel.libc,
-                                sock.identity.family,
-                                sock.identity.remote.addr
+                    clay::@ui_with_id(
+                        clay::@id("inspect-content"),
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                                .sizing = {
+                                    .width = clay::sizing_grow(),
+                                    .height = clay::sizing_grow()
+                                },
+                                .padding = { .top = 4, .bottom = 0 },
+                                .child_gap = 2,
+                            },
+                        }
+                    ) {
+                        inspect_line(
+                            "remote     ",
+                            string::tformat(
+                                "[%s]:%d",
+                                fetch::convert_ip(
+                                    &channel.libc,
+                                    sock.identity.family,
+                                    sock.identity.remote.addr
+                                ),
+                                sock.identity.remote.port
                             ),
-                            sock.identity.remote.port
-                        ),
-                        true
-                    );
-                    inspect_line(
-                        "local     ",
-                        string::tformat(
-                            "%s:%d",
-                            fetch::convert_ip(&channel.libc, 2, sock.identity.local.addr),
-                            sock.identity.local.port
-                        ),
-                        false
-                    );
-                    if (info) {
-                        inspect_line(
-                            "host      ",
-                            copy_da_string(info.hostname, &channel.libc),
-                            false
+                            true
                         );
-                        inspect_line(
-                            "cname     ",
-                            copy_da_string(info.cname, &channel.libc),
-                            false
-                        );
-                        inspect_line("pid       ", string::tformat("%d", info.pid), false);
-                    }
-                    if (stats) {
-                        inspect_line(
-                            "sent      ",
-                            string::tformat("%d KB", stats.sent / 1024),
-                            false
-                        );
-                        inspect_line(
-                            "recv      ",
-                            string::tformat("%d KB", stats.received / 1024),
-                            false
-                        );
-                    }
-                    inspect_line(
-                        "state     ",
-                        string::tformat("%s", sock.state),
-                        sock.state == SocketState.ESTABLISHED
-                    );
+
+                        if (info) {
+                            inspect_line(
+                                "host       ",
+                                copy_da_string(info.hostname, &channel.libc),
+                                true
+                            );
+                            inspect_line(
+                                "cname      ",
+                                copy_da_string(info.cname, &channel.libc),
+                                false
+                            );
+                            inspect_line("pid        ", string::tformat("%d", info.pid), false);
+                        }
+
+                        if (stats) {
+                            inspect_line(
+                                "sent       ",
+                                string::tformat("%d KB", stats.sent / 1024),
+                                false
+                            );
+                            inspect_line(
+                                "recv       ",
+                                string::tformat("%d KB", stats.received / 1024),
+                                false
+                            );
+                        }
+
+                        String state_display = string::tformat("%s", sock.state);
+                        ClayColor state_color = (sock.state
+                            == SocketState.ESTABLISHED) ? COLOR_GREEN : COLOR_WARN;
+
+                        clay::@ui_with_id(
+                            clay::@id("inspect-state"),
+                            {
+                                .layout = {
+                                    .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                                    .sizing = {
+                                        .width = clay::sizing_grow(),
+                                        .height = clay::sizing_fixed(20)
+                                    },
+                                    .padding = { .left = 0, .right = 0, .top = 0, .bottom = 0 },
+                                    .child_gap = 6,
+                                },
+                            }
+                        ) {
+                            clay::@text(clay::@string("state      "), text_cfg(COLOR_DIM, 20));
+                            clay::@text(clay::@string("["), text_cfg(COLOR_DIM, 20));
+                            clay::@text(clay::@string(state_display), text_cfg(state_color, 20));
+                            clay::@text(clay::@string("]"), text_cfg(COLOR_DIM, 20));
+                        };
+                    };
                 } else {
-                    clay::@text(clay::@string("no sockets"), text_cfg(COLOR_DIM));
+                    clay::@ui_with_id(
+                        clay::@id("inspect-empty"),
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
+                                .sizing = {
+                                    .width = clay::sizing_grow(),
+                                    .height = clay::sizing_grow()
+                                },
+                                .padding = { .top = 8, .bottom = 0 },
+                            },
+                        }
+                    ) {
+                        clay::@text(clay::@string("no sockets"), text_cfg(COLOR_DIM, 20));
+                    };
                 }
             };
         };
 
-        // footer
         clay::@ui_with_id(
             clay::@id("footer"),
             {
                 .layout = {
                     .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
-                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(20) },
+                    .sizing = { .width = clay::sizing_grow(), .height = clay::sizing_fixed(24) },
+                    .padding = { .left = 0, .right = 0, .top = 12, .bottom = 0 },
+                    .child_gap = 16,
+                    .child_alignment = {
+                        .x = clay::ClayLayoutAlignmentX.CENTER,
+                        .y = clay::ClayLayoutAlignmentY.CENTER
+                    },
                 },
-                .border = { .color = COLOR_BORDER, .width = { .top = 1 } },
+                .border = { .color = COLOR_BORDER, .width = { .top = 1 }, },
             }
         ) {
-            clay::@text(
-                clay::@string("[up/down] apps   [tab] sockets   [enter] inspect   [/] filter"),
-                text_cfg(COLOR_DIM, 20)
-            );
+            footer_key("up / down", " apps", 0);
+            clay::@text(clay::@string(" "), text_cfg(COLOR_DIM, 18));
+            footer_key("tab", " sockets", 1);
+            clay::@text(clay::@string(" "), text_cfg(COLOR_DIM, 18));
+            footer_key("/", " filter", 4);
         };
     };
 }
