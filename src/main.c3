@@ -117,6 +117,39 @@ fn String copy_da_string(String str, Allocator allocator) {
     return str.copy(allocator);
 }
 
+ulong g_selected_app_id = 0;
+bool g_has_selected_app = false;
+
+
+fn String get_state(SocketState state) {
+    switch (state) {
+        case SocketState.ESTABLISHED:
+            return "ESTB";
+        case SocketState.SYN_SENT:
+            return "SYNS";
+        case SocketState.SYN_RECV:
+            return "SYNR";
+        case SocketState.FIN_WAIT1:
+            return "FW1";
+        case SocketState.FIN_WAIT2:
+            return "FW2";
+        case SocketState.TIME_WAIT:
+            return "TWAIT";
+        case SocketState.CLOSE:
+            return "CLOSE";
+        case SocketState.CLOSE_WAIT:
+            return "CWT";
+        case SocketState.LAST_ACK:
+            return "LACK";
+        case SocketState.LISTEN:
+            return "LISTEN";
+        case SocketState.CLOSING:
+            return "CLOS";
+        default:
+            return "UNKN";
+    }
+}
+
 fn void layout(NetworkChannel* channel, bool mouse_clicked) {
     poll_snapshot(channel);
     if (!g_has_snapshot) {
@@ -130,7 +163,19 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
         g_app_count++;
     };
 
-    if (g_app_idx >= g_app_count) g_app_idx = 0;
+    if (!g_has_selected_app && g_app_count > 0) {
+        g_selected_app_id = g_app_ids[0];
+        g_has_selected_app = true;
+    }
+
+    g_app_idx = 0;
+    for (int i = 0; i < g_app_count; i++) {
+        if (g_app_ids[i] == g_selected_app_id) {
+            g_app_idx = i;
+            break;
+        }
+    }
+
     ulong selected_app_id = g_app_count > 0 ? g_app_ids[g_app_idx] : 0;
 
     g_sock_count = 0;
@@ -215,6 +260,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                     row_text_id(id, g_app_list[i].name, i == g_app_idx, false);
                     if (mouse_clicked && clay::pointer_over(id)) {
                         g_app_idx = i;
+                        g_selected_app_id = g_app_ids[i];
                         g_sock_idx = 0;
                     }
                 }
@@ -244,7 +290,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             panel_header(string::tformat("sockets [%s] (%d)", app_name, g_sock_count));
             for (int i = 0; i < g_sock_count; i++) {
                 Socket s           = g_sock_list[i];
-                String state_short = s.state == SocketState.ESTABLISHED ? "ESTB" : "TWAIT";
+                String state_short = get_state(s.state);
                 String label = string::tformat(
                     "%s:%d  %s",
                     fetch::convert_ip(&channel.libc, s.identity.family, s.identity.remote.addr),
@@ -667,7 +713,7 @@ fn void main(String[] args) {
     nc.app_map = app_map;
     nc.sock_map = sock_map;
     nc.next_app_id = 0;
-    nc.retention = (NanoDuration)10_000;
+    nc.retention = (NanoDuration)100_000_000_000;
 
     t_3.create((ThreadFn)&init_ui, &nc)!!;
     t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;

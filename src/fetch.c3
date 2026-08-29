@@ -29,6 +29,7 @@ enum EventType {
     BIND,
     LISTEN,
     CLOSE,
+    STATE_CHANGE,
 }
 
 struct Event {
@@ -47,6 +48,7 @@ struct Event {
     ulong timestamp_ns;
     EventType event_type;
     ulong sock_cookie;
+    char state;
 }
 
 alias SocketId = ulong;
@@ -250,17 +252,53 @@ struct NetworkInfo {
     ProcessInfo process_info;
 }
 
+fn SocketState get_state(char state) {
+    switch (state) {
+        case 1:
+            return ESTABLISHED;
+        case 2:
+            return SYN_SENT;
+        case 3:
+            return SYN_RECV;
+        case 4:
+            return FIN_WAIT1;
+        case 5:
+            return FIN_WAIT2;
+        case 6:
+            return TIME_WAIT;
+        case 7:
+            return CLOSE;
+        case 8:
+            return CLOSE_WAIT;
+        case 9:
+            return LAST_ACK;
+        case 10:
+            return LISTEN;
+        case 11:
+            return CLOSING;
+        default:
+            return UNKNOWN;
+    }
+}
+
 fn NetworkInfo? get_process_info(NetworkChannel* recv) {
     @pool_init(&recv.libc, 8192) {
         NetworkInfo ni = { };
         Event? ev      = recv.channel.try_pop();
         if (catch ev) return EVENT_NOT_FOUND_ERROR~;
 
-        if (ev.event_type == EventType.CLOSE) {
+        if (ev.event_type == EventType.CLOSE || ev.event_type == EventType.STATE_CHANGE) {
             Socket? existing = recv.sock_map.get(ev.sock_cookie);
             if (catch existing) return EVENT_NOT_FOUND_ERROR~;
-            existing.state = SocketState.CLOSE;
+
+            existing.state = (ev.event_type
+                == EventType.CLOSE) ? SocketState.CLOSE : get_state(ev.state);
             existing.last_seen = clock::now();
+            recv.sock_map.set(ev.sock_cookie, existing);
+
+            ni.event = ev;
+            io::printn("returning");
+            return ni;
         }
 
         ProcessInfo pi = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
@@ -268,7 +306,6 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             .name = pi.process.name.copy(&recv.libc),
             .executable = pi.exe_path.copy(&recv.libc),
         };
-
         defer pi.free(&recv.libc);
 
         ulong app_id;
@@ -291,9 +328,10 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             .protocol = Protocol.TCP,
             .family = ev.family
         };
+
         Socket new_socket = {
             .identity = identity,
-            .state = SocketState.ESTABLISHED,
+            .state = get_state(ev.state),
             .sock_cookie = ev.sock_cookie,
             .app_id = app_id,
             .pid = (uint)ev.pid,

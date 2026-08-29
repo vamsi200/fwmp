@@ -15,7 +15,7 @@
 const ushort AF_INET = 2;
 const ushort AF_INET6 = 10;
 
-enum event_type { CONNECT, ACCEPT, BIND, LISTEN, CLOSE };
+enum event_type { CONNECT, ACCEPT, BIND, LISTEN, CLOSE, STATE_CHANGE };
 
 struct event {
   __u32 pid;
@@ -54,6 +54,23 @@ struct {
   __type(key, __u64);
   __type(value, __u64);
 } sock_bytes_recv SEC(".maps");
+
+SEC("fexit/tcp_set_state")
+int BPF_PROG(tcp_set_state_exit, struct sock *sk, int state) {
+  struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+  if (!event)
+    return 0;
+
+  __u64 pid_tgid = bpf_get_current_pid_tgid();
+  event->pid = pid_tgid >> 32;
+  event->sock_cookie = bpf_get_socket_cookie(sk);
+  event->state = (__u8)state;
+  event->type = STATE_CHANGE;
+  event->timestamp_ns = bpf_ktime_get_ns();
+
+  bpf_ringbuf_submit(event, 0);
+  return 0;
+}
 
 SEC("fexit/tcp_sendmsg")
 int BPF_PROG(tcp_sendmsg_exit, struct sock *sk, struct msghdr *msg, size_t size,
@@ -99,7 +116,6 @@ int BPF_PROG(tcp_v4_connect_exit, struct sock *sk, struct sockaddr *uaddr,
 
   __u64 pid_tgid = bpf_get_current_pid_tgid();
 
-  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
   event->pid = pid_tgid >> 32;
   event->tid = (__u32)pid_tgid;
 
@@ -145,7 +161,6 @@ int BPF_PROG(tcp_v6_connect_exit, struct sock *sk, struct sockaddr *uaddr,
   event->tid = (__u32)pid_tgid;
 
   event->timestamp_ns = bpf_ktime_get_ns();
-  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
 
   event->family = AF_INET6;
   event->protocol = IPPROTO_TCP;
@@ -184,7 +199,6 @@ int BPF_PROG(inet_csk_accept, struct sock *sk, struct proto_accept_arg *arg,
   event->timestamp_ns = bpf_ktime_get_ns();
   __u16 family = BPF_CORE_READ(retval, __sk_common.skc_family);
   event->family = (__u8)family;
-  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
 
   event->protocol = IPPROTO_TCP;
   if (family == AF_INET) {
@@ -222,7 +236,6 @@ int BPF_PROG(inet_bind, struct socket *sock, struct sockaddr *uaddr,
 
   __u64 pid_tgid = bpf_get_current_pid_tgid();
 
-  event->state = BPF_CORE_READ(sock, sk, __sk_common.skc_state);
   event->pid = pid_tgid >> 32;
   event->tid = (__u32)pid_tgid;
   event->timestamp_ns = bpf_ktime_get_ns();
@@ -277,7 +290,6 @@ int BPF_PROG(inet_listen, struct socket *sock, int backlog, int retval) {
   event->timestamp_ns = bpf_ktime_get_ns();
 
   __u16 family = BPF_CORE_READ(sock, sk, __sk_common.skc_family);
-  event->state = BPF_CORE_READ(sock, sk, __sk_common.skc_state);
 
   event->family = (__u8)family;
   event->protocol = IPPROTO_TCP;
@@ -324,7 +336,6 @@ int BPF_PROG(tcp_close, struct sock *sk, long int timeout) {
 
   event->family = AF_INET;
   event->protocol = 6;
-  event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
 
   __u32 local_addr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
 
