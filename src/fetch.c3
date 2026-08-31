@@ -182,7 +182,7 @@ struct NetworkChannel {
     RingBufContext* ring_buf_ctx;
     RingBuffer* rb;
     NetworkStats network_stats;
-    NanoDuration duration;
+    NanoDuration fetch_interval;
     HashMap{Application, ulong} app_map;
     HashMap{ulong, Socket} sock_map;
     ulong next_app_id;
@@ -403,7 +403,7 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
     to_remove.clear();
 
     for (;;) {
-        if (clock::now() - start >= network_channel.duration) break;
+        if (clock::now() - start >= network_channel.fetch_interval) break;
         NetworkInfo? info = get_process_info(network_channel);
         if (catch info) continue;
     }
@@ -443,6 +443,7 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
     }
 
     foreach (cookie : to_remove) {
+        io::printfn("removing cookie: %d", cookie);
         network_channel.sock_map.remove(cookie);
     }
 

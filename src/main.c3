@@ -3,7 +3,6 @@ import std::io;
 import clay;
 import raylib6::rl;
 import std::thread;
-import parser;
 import libbpf;
 import fetch;
 import std::thread::channel;
@@ -37,6 +36,9 @@ RLFont g_font;
 const int MAX_APPS  = 32;
 const int MAX_SOCKS = 64;
 
+long g_retention_secs       = 100;
+long g_fetch_interval_ms = 100;
+
 Application[MAX_APPS] g_app_list;
 ulong[MAX_APPS] g_app_ids;
 int g_app_count = 0;
@@ -54,8 +56,6 @@ fn void poll_snapshot(NetworkChannel* channel) {
     NetworkSnapshot? snap = channel.snapshot_channel.try_pop();
     if (try snap) {
         if (g_has_snapshot) {
-            // g_snapshot.app.free();
-
             g_snapshot.sock.free();
             g_snapshot.traffic_stats.free();
             g_snapshot.information.free();
@@ -263,6 +263,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
         }
     }
 
+
     clay::@ui_with_id(
         clay::@id("fwmp-root"),
         {
@@ -301,6 +302,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             }
         ) {
             clay::@text(clay::@string("fwmp v0.1"), text_cfg(COLOR_DIM, 20));
+
             clay::@ui_with_id(
                 clay::@id("title-spacer"),
                 {
@@ -313,6 +315,250 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                     },
                 }
             ) {
+            };
+
+            clay::@ui_with_id(
+                clay::@id("settings-panel"),
+                {
+                    .layout = {
+                        .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                        .sizing = {
+                            .width = clay::sizing_fixed(0),
+                            .height = clay::sizing_fixed(0)
+                        },
+                        .child_gap = 16,
+                        .child_alignment = {
+                            .x = clay::ClayLayoutAlignmentX.CENTER,
+                            .y = clay::ClayLayoutAlignmentY.CENTER
+                        },
+                    },
+                }
+            ) {
+                clay::@ui_with_id(
+                    clay::@id("retention-control"),
+                    {
+                        .layout = {
+                            .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                            .sizing = {
+                                .width = clay::sizing_fixed(0),
+                                .height = clay::sizing_fixed(0)
+                            },
+                            .child_gap = 6,
+                            .child_alignment = {
+                                .x = clay::ClayLayoutAlignmentX.CENTER,
+                                .y = clay::ClayLayoutAlignmentY.CENTER
+                            },
+                        },
+                    }
+                ) {
+                    clay::@text(clay::@string("ret:"), text_cfg(COLOR_DIM, 20));
+
+                    clay::@text(
+                        clay::@string(string::tformat("%ds", g_retention_secs)),
+                        text_cfg(COLOR_TEXT, 20)
+                    );
+
+                    clay::@ui_with_id(
+                        clay::@id("retention-dec"),
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                                .sizing = {
+                                    .width = clay::sizing_fixed(20),
+                                    .height = clay::sizing_fixed(18)
+                                },
+                                .padding = { .left = 2, .right = 2, .top = 1, .bottom = 1 },
+                                .child_alignment = {
+                                    .x = clay::ClayLayoutAlignmentX.CENTER,
+                                    .y = clay::ClayLayoutAlignmentY.CENTER
+                                },
+                            },
+                            .background_color = clay::pointer_over(
+                                clay::@id("retention-dec")
+                            ) ? COLOR_HOVER : COLOR_TRANSPARENT,
+                            .border = {
+                                .color = COLOR_BORDER,
+                                .width = {
+                                    .left = 1,
+                                    .right = 0,
+                                    .top = 1,
+                                    .bottom = 1,
+                                    .between_children = 0
+                                },
+                            },
+                            .corner_radius = {
+                                .top_left = 3,
+                                .top_right = 0,
+                                .bottom_left = 3,
+                                .bottom_right = 0
+                            },
+                        }
+                    ) {
+                        clay::@text(clay::@string("-"), text_cfg(COLOR_TEXT, 20));
+                    };
+
+                    clay::@ui_with_id(
+                        clay::@id("retention-inc"),
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                                .sizing = {
+                                    .width = clay::sizing_fixed(20),
+                                    .height = clay::sizing_fixed(18)
+                                },
+                                .padding = { .left = 2, .right = 2, .top = 1, .bottom = 1 },
+                                .child_alignment = {
+                                    .x = clay::ClayLayoutAlignmentX.CENTER,
+                                    .y = clay::ClayLayoutAlignmentY.CENTER
+                                },
+                            },
+                            .background_color = clay::pointer_over(
+                                clay::@id("retention-inc")
+                            ) ? COLOR_HOVER : COLOR_TRANSPARENT,
+                            .border = {
+                                .color = COLOR_BORDER,
+                                .width = {
+                                    .left = 0,
+                                    .right = 1,
+                                    .top = 1,
+                                    .bottom = 1,
+                                    .between_children = 0
+                                },
+                            },
+                            .corner_radius = {
+                                .top_left = 0,
+                                .top_right = 3,
+                                .bottom_left = 0,
+                                .bottom_right = 3
+                            },
+                        }
+                    ) {
+                        clay::@text(clay::@string("+"), text_cfg(COLOR_TEXT, 20));
+                    };
+                };
+
+                clay::@ui_with_id(
+                    clay::@id("fetch-control"),
+                    {
+                        .layout = {
+                            .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                            .sizing = {
+                                .width = clay::sizing_fixed(0),
+                                .height = clay::sizing_fixed(0)
+                            },
+                            .child_gap = 6,
+                            .child_alignment = {
+                                .x = clay::ClayLayoutAlignmentX.CENTER,
+                                .y = clay::ClayLayoutAlignmentY.CENTER
+                            },
+                        },
+                    }
+                ) {
+                    clay::@text(clay::@string("fetch:"), text_cfg(COLOR_DIM, 20));
+
+                    clay::@text(
+                        clay::@string(string::tformat("%dms", g_fetch_interval_ms)),
+                        text_cfg(COLOR_TEXT, 20)
+                    );
+
+                    clay::@ui_with_id(
+                        clay::@id("fetch-dec"),
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                                .sizing = {
+                                    .width = clay::sizing_fixed(20),
+                                    .height = clay::sizing_fixed(18)
+                                },
+                                .padding = { .left = 2, .right = 2, .top = 1, .bottom = 1 },
+                                .child_alignment = {
+                                    .x = clay::ClayLayoutAlignmentX.CENTER,
+                                    .y = clay::ClayLayoutAlignmentY.CENTER
+                                },
+                            },
+                            .background_color = clay::pointer_over(
+                                clay::@id("fetch-dec")
+                            ) ? COLOR_HOVER : COLOR_TRANSPARENT,
+                            .border = {
+                                .color = COLOR_BORDER,
+                                .width = {
+                                    .left = 1,
+                                    .right = 0,
+                                    .top = 1,
+                                    .bottom = 1,
+                                    .between_children = 0
+                                },
+                            },
+                            .corner_radius = {
+                                .top_left = 3,
+                                .top_right = 0,
+                                .bottom_left = 3,
+                                .bottom_right = 0
+                            },
+                        }
+                    ) {
+                        clay::@text(clay::@string("-"), text_cfg(COLOR_TEXT, 14));
+                    };
+
+                    clay::@ui_with_id(
+                        clay::@id("fetch-inc"),
+                        {
+                            .layout = {
+                                .layout_direction = clay::ClayLayoutDirection.LEFT_TO_RIGHT,
+                                .sizing = {
+                                    .width = clay::sizing_fixed(20),
+                                    .height = clay::sizing_fixed(18)
+                                },
+                                .padding = { .left = 2, .right = 2, .top = 1, .bottom = 1 },
+                                .child_alignment = {
+                                    .x = clay::ClayLayoutAlignmentX.CENTER,
+                                    .y = clay::ClayLayoutAlignmentY.CENTER
+                                },
+                            },
+                            .background_color = clay::pointer_over(
+                                clay::@id("fetch-inc")
+                            ) ? COLOR_HOVER : COLOR_TRANSPARENT,
+                            .border = {
+                                .color = COLOR_BORDER,
+                                .width = {
+                                    .left = 0,
+                                    .right = 1,
+                                    .top = 1,
+                                    .bottom = 1,
+                                    .between_children = 0
+                                },
+                            },
+                            .corner_radius = {
+                                .top_left = 0,
+                                .top_right = 3,
+                                .bottom_left = 0,
+                                .bottom_right = 3
+                            },
+                        }
+                    ) {
+                        clay::@text(clay::@string("+"), text_cfg(COLOR_TEXT, 14));
+                    };
+
+                    if (mouse_clicked) {
+                        if (clay::pointer_over(clay::@id("retention-dec"))) {
+                            g_retention_secs = max(g_retention_secs - 1, 1);
+                            channel.retention = set_retention(g_retention_secs);
+                        }
+                        if (clay::pointer_over(clay::@id("retention-inc"))) {
+                            g_retention_secs = min(g_retention_secs + 1, 60);
+                            channel.retention = set_retention(g_retention_secs);
+                        }
+
+                        if (clay::pointer_over(clay::@id("fetch-dec"))) {
+                            g_fetch_interval_ms = max(g_fetch_interval_ms - 10, 10);
+                            channel.fetch_interval = set_fetch_interval(g_fetch_interval_ms);
+                        }
+                        if (clay::pointer_over(clay::@id("fetch-inc"))) {
+                            g_fetch_interval_ms = min(g_fetch_interval_ms + 10, 1000);
+                            channel.fetch_interval = set_fetch_interval(g_fetch_interval_ms);
+                        }
+                    }
+                };
             };
         };
 
@@ -625,7 +871,6 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             footer_key("/", " filter", 4);
         };
     };
-
 }
 
 fn clay::ClayDimensions measure_text(
@@ -755,90 +1000,99 @@ fn void init_ui(NetworkChannel* channel) {
 
         bool quit = false;
         while (!rl::window_should_close() && !quit) {
-          @pool() {
-            if (rl::is_key_pressed(rl::RLKeyboardKey.Q)) {
-                quit = true;
-            }
-            if (rl::is_key_pressed(rl::RLKeyboardKey.DOWN)) {
-                g_sock_idx = 0;
-                if (g_app_count > 0) g_app_idx = math::min(g_app_idx + 1, g_app_count - 1);
-            }
-            if (rl::is_key_pressed(rl::RLKeyboardKey.UP)) {
-                g_sock_idx = 0;
-                g_app_idx = math::max(g_app_idx - 1, 0);
-            }
-            if (rl::is_key_pressed(rl::RLKeyboardKey.TAB)) {
-                if (g_sock_count > 0) g_sock_idx = (g_sock_idx + 1) % g_sock_count;
-            }
-
-            static float g_pressed_at  = 0;
-            const float GG_TIMEOUT     = 0.4f;
-            static bool g_pressed_once = false;
-
-            bool g_scroll_to_top    = false;
-            bool g_scroll_to_bottom = false;
-
-            if (rl::is_key_pressed(rl::RLKeyboardKey.G)) {
-                bool shift = rl::is_key_down(rl::RLKeyboardKey.LEFT_SHIFT)
-                    || rl::is_key_down(rl::RLKeyboardKey.RIGHT_SHIFT);
-                if (shift) {
-                    if (g_sock_count > 0) g_sock_idx = g_sock_count - 1;
-                    g_pressed_once = false;
-                    g_scroll_to_bottom = true;
-                } else if (g_pressed_once && (rl::get_time() - g_pressed_at) < GG_TIMEOUT) {
+            @pool() {
+                if (rl::is_key_pressed(rl::RLKeyboardKey.Q)) {
+                    quit = true;
+                }
+                if (rl::is_key_pressed(rl::RLKeyboardKey.DOWN)) {
                     g_sock_idx = 0;
-                    g_scroll_to_top = true;
-                    g_pressed_once = false;
-                } else {
-                    g_pressed_once = true;
-                    g_pressed_at = (float)rl::get_time();
+                    if (g_app_count > 0) g_app_idx = math::min(g_app_idx + 1, g_app_count - 1);
                 }
-            }
-
-            rl::RLVector2 mouse_pos = rl::get_mouse_position();
-            bool mouse_down         = rl::is_mouse_button_down(rl::RLMouseButton.LEFT);
-            bool mouse_clicked      = rl::is_mouse_button_pressed(rl::RLMouseButton.LEFT);
-            clay::set_pointer_state({ mouse_pos.x, mouse_pos.y }, mouse_down);
-
-            float wheel_y        = rl::get_mouse_wheel_move();
-            float scroll_delta_y = wheel_y;
-
-            if (g_scroll_to_top) {
-                scroll_delta_y = 100000;
-                g_scroll_to_top = false;
-            }
-            if (g_scroll_to_bottom) {
-                scroll_delta_y = -100000;
-                g_scroll_to_bottom = false;
-            }
-
-            clay::update_scroll_containers(false, { 0, scroll_delta_y }, rl::get_frame_time());
-
-            if (wheel_y != 0 && g_sock_count > 0) {
-                g_sock_idx = math::clamp(g_sock_idx - (int)wheel_y, 0, g_sock_count - 1);
-            }
-
-            clay::set_layout_dimensions(
-                {
-                    .width = (float)rl::get_screen_width(),
-                    .height = (float)rl::get_screen_height(),
+                if (rl::is_key_pressed(rl::RLKeyboardKey.UP)) {
+                    g_sock_idx = 0;
+                    g_app_idx = math::max(g_app_idx - 1, 0);
                 }
-            );
+                if (rl::is_key_pressed(rl::RLKeyboardKey.TAB)) {
+                    if (g_sock_count > 0) g_sock_idx = (g_sock_idx + 1) % g_sock_count;
+                }
 
-            clay::begin_layout();
-            layout(channel, mouse_clicked);
-            clay::ClayRenderCommandArray cmds = clay::end_layout(rl::get_frame_time());
+                static float g_pressed_at  = 0;
+                const float GG_TIMEOUT     = 0.4f;
+                static bool g_pressed_once = false;
 
-            rl::begin_drawing();
-            rl::clear_background(rl::BLACK);
-            clay_raylib_render(&cmds);
-            rl::end_drawing();
-          };
+                bool g_scroll_to_top    = false;
+                bool g_scroll_to_bottom = false;
+
+                if (rl::is_key_pressed(rl::RLKeyboardKey.G)) {
+                    bool shift = rl::is_key_down(rl::RLKeyboardKey.LEFT_SHIFT)
+                        || rl::is_key_down(rl::RLKeyboardKey.RIGHT_SHIFT);
+                    if (shift) {
+                        if (g_sock_count > 0) g_sock_idx = g_sock_count - 1;
+                        g_pressed_once = false;
+                        g_scroll_to_bottom = true;
+                    } else if (g_pressed_once && (rl::get_time() - g_pressed_at) < GG_TIMEOUT) {
+                        g_sock_idx = 0;
+                        g_scroll_to_top = true;
+                        g_pressed_once = false;
+                    } else {
+                        g_pressed_once = true;
+                        g_pressed_at = (float)rl::get_time();
+                    }
+                }
+
+                rl::RLVector2 mouse_pos = rl::get_mouse_position();
+                bool mouse_down         = rl::is_mouse_button_down(rl::RLMouseButton.LEFT);
+                bool mouse_clicked      = rl::is_mouse_button_pressed(rl::RLMouseButton.LEFT);
+                clay::set_pointer_state({ mouse_pos.x, mouse_pos.y }, mouse_down);
+
+                float wheel_y        = rl::get_mouse_wheel_move();
+                float scroll_delta_y = wheel_y;
+
+                if (g_scroll_to_top) {
+                    scroll_delta_y = 100000;
+                    g_scroll_to_top = false;
+                }
+                if (g_scroll_to_bottom) {
+                    scroll_delta_y = -100000;
+                    g_scroll_to_bottom = false;
+                }
+
+                clay::update_scroll_containers(false, { 0, scroll_delta_y }, rl::get_frame_time());
+
+                if (wheel_y != 0 && g_sock_count > 0) {
+                    g_sock_idx = math::clamp(g_sock_idx - (int)wheel_y, 0, g_sock_count - 1);
+                }
+
+                clay::set_layout_dimensions(
+                    {
+                        .width = (float)rl::get_screen_width(),
+                        .height = (float)rl::get_screen_height(),
+                    }
+                );
+
+                clay::begin_layout();
+                layout(channel, mouse_clicked);
+
+                clay::ClayRenderCommandArray cmds = clay::end_layout(rl::get_frame_time());
+
+                rl::begin_drawing();
+                rl::clear_background(rl::BLACK);
+                clay_raylib_render(&cmds);
+                rl::end_drawing();
+            };
         }
-
     };
 }
 
+fn NanoDuration set_retention(long retention_secs = 100) {
+    Duration d = time::sec(retention_secs);
+    return d.to_nano();
+}
+
+fn NanoDuration set_fetch_interval(long tick = 100) {
+    Duration d = time::ms(tick);
+    return d.to_nano();
+}
 
 fn void main(String[] args) {
     Thread t_1, t_2, t_3;
@@ -935,20 +1189,22 @@ fn void main(String[] args) {
 
     HashMap{Application, ulong} app_map;
     app_map.init(&libc, 1024);
+    defer app_map.free();
 
     HashMap{ulong, Socket} sock_map;
     sock_map.init(&libc, 1024);
+    defer sock_map.free();
 
     nc.map_fd = map_fd;
     nc.ring_buf_ctx = &ring_buf_ctx;
     nc.rb = rb;
     nc.network_stats.sent = sock_bytes_sent;
     nc.network_stats.recv = sock_bytes_recv;
-    nc.duration = (NanoDuration)100_000_000;
+    nc.fetch_interval = set_fetch_interval();
     nc.app_map = app_map;
     nc.sock_map = sock_map;
     nc.next_app_id = 0;
-    nc.retention = (NanoDuration)100_000_000_000;
+    nc.retention = set_retention();
 
     t_3.create((ThreadFn)&init_ui, &nc)!!;
     t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;
