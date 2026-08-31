@@ -492,7 +492,7 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
             .cmdline = process_info.cmdline,
             .uid = process_info.uid,
             .family = sock.identity.family,
-            .protocol = (char)sock.identity.protocol,
+            .protocol = sock.identity.protocol,
             };
 
         sockets_list.push(sock);
@@ -542,9 +542,8 @@ struct InspectInformation {
     ushort local_port;
     ushort remote_port;
     char family;
-    char protocol;
+    Protocol protocol;
     EventType event_type;
-    ulong timestamp;
     // String hostname;
     // String cname;
     // String Cert;

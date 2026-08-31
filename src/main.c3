@@ -871,7 +871,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                             );
                             inspect_line("local", local_addr, false);
 
-                            inspect_line("protocol", string::tformat("%d", info.protocol), false);
+                            inspect_line("protocol", string::tformat("%s", info.protocol), false);
                             inspect_line("family", string::tformat("%d", info.family), false);
 
                             SocketState state    = info.sock_state;
@@ -908,10 +908,9 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                                 clay::@text(clay::@string("]"), text_cfg(COLOR_DIM, 20));
                             };
 
-                            inspect_line("timestamp", string::tformat("%d", info.timestamp), false);
                             inspect_line(
                                 "event_type",
-                                string::tformat("%d", info.event_type.ordinal),
+                                string::tformat("%s", info.event_type),
                                 false
                             );
 
