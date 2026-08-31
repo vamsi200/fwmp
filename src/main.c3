@@ -631,7 +631,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                     );
 
                     clay::@text(
-                        clay::@string(is_focused ? "* " : " "),
+                        clay::@string(is_focused ? ">> " : " "),
                         text_cfg(is_focused ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
                     );
 
@@ -699,7 +699,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                 );
 
                 clay::@text(
-                    clay::@string(is_focused ? "* " : " "),
+                    clay::@string(is_focused ? ">> " : " "),
                     text_cfg(is_focused ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
                 );
 
@@ -1239,7 +1239,9 @@ fn void init_ui(NetworkChannel* channel) {
                 if (rl::is_key_pressed(rl::RLKeyboardKey.DOWN)) {
                     if (g_focus == "apps") {
                         if (g_app_count > 0) {
-                            g_app_idx = math::min(g_app_idx + 1, g_app_count - 1);
+                            int new_idx = math::min(g_app_idx + 1, g_app_count - 1);
+                            g_app_idx = new_idx;
+                            g_selected_app_id = g_app_ids[new_idx];
                             g_sock_idx = 0;
                         }
                     } else {
@@ -1252,7 +1254,9 @@ fn void init_ui(NetworkChannel* channel) {
                 if (rl::is_key_pressed(rl::RLKeyboardKey.UP)) {
                     if (g_focus == "apps") {
                         if (g_app_count > 0) {
-                            g_app_idx = math::max(g_app_idx - 1, 0);
+                            int new_idx = math::max(g_app_idx - 1, 0);
+                            g_app_idx = new_idx;
+                            g_selected_app_id = g_app_ids[new_idx];
                             g_sock_idx = 0;
                         }
                     } else {
@@ -1265,7 +1269,9 @@ fn void init_ui(NetworkChannel* channel) {
                 if (rl::is_key_pressed(rl::RLKeyboardKey.J)) {
                     if (g_focus == "apps") {
                         if (g_app_count > 0) {
-                            g_app_idx = math::min(g_app_idx + 1, g_app_count - 1);
+                            int new_idx = math::min(g_app_idx + 1, g_app_count - 1);
+                            g_app_idx = new_idx;
+                            g_selected_app_id = g_app_ids[new_idx];
                             g_sock_idx = 0;
                         }
                     } else {
@@ -1278,7 +1284,9 @@ fn void init_ui(NetworkChannel* channel) {
                 if (rl::is_key_pressed(rl::RLKeyboardKey.K)) {
                     if (g_focus == "apps") {
                         if (g_app_count > 0) {
-                            g_app_idx = math::max(g_app_idx - 1, 0);
+                            int new_idx = math::max(g_app_idx - 1, 0);
+                            g_app_idx = new_idx;
+                            g_selected_app_id = g_app_ids[new_idx];
                             g_sock_idx = 0;
                         }
                     } else {
@@ -1295,9 +1303,11 @@ fn void init_ui(NetworkChannel* channel) {
                     }
                 }
 
-                static float g_pressed_at  = 0;
-                const float GG_TIMEOUT     = 0.4f;
-                static bool g_pressed_once = false;
+                float g_pressed_at                = 0.0f;
+                const float GG_TIMEOUT            = 0.4f;
+                bool g_pressed_once               = false;
+                static float g_pressed_at_static  = 0.0f;
+                static bool g_pressed_once_static = false;
 
                 bool g_scroll_to_top    = false;
                 bool g_scroll_to_bottom = false;
@@ -1310,16 +1320,17 @@ fn void init_ui(NetworkChannel* channel) {
                             g_sock_idx = g_sock_count - 1;
                             g_focus = "sockets";
                         }
-                        g_pressed_once = false;
+                        g_pressed_once_static = false;
                         g_scroll_to_bottom = true;
-                    } else if (g_pressed_once && (rl::get_time() - g_pressed_at) < GG_TIMEOUT) {
+                    } else if (g_pressed_once_static
+                        && (rl::get_time() - g_pressed_at_static) < GG_TIMEOUT) {
                         g_sock_idx = 0;
                         g_focus = "sockets";
                         g_scroll_to_top = true;
-                        g_pressed_once = false;
+                        g_pressed_once_static = false;
                     } else {
-                        g_pressed_once = true;
-                        g_pressed_at = (float)rl::get_time();
+                        g_pressed_once_static = true;
+                        g_pressed_at_static = (float)rl::get_time();
                     }
                 }
 
@@ -1342,8 +1353,23 @@ fn void init_ui(NetworkChannel* channel) {
 
                 clay::update_scroll_containers(false, { 0, scroll_delta_y }, rl::get_frame_time());
 
-                if (wheel_y != 0 && g_sock_count > 0 && g_focus == "sockets") {
-                    g_sock_idx = math::clamp(g_sock_idx - (int)wheel_y, 0, g_sock_count - 1);
+                if (wheel_y != 0) {
+                    if (g_focus == "apps") {
+                        if (g_app_count > 0) {
+                            int new_idx = math::clamp(g_app_idx - (int)wheel_y, 0, g_app_count - 1);
+                            g_app_idx = new_idx;
+                            g_selected_app_id = g_app_ids[new_idx];
+                            g_sock_idx = 0;
+                        }
+                    } else {
+                        if (g_sock_count > 0) {
+                            g_sock_idx = math::clamp(
+                                g_sock_idx - (int)wheel_y,
+                                0,
+                                g_sock_count - 1
+                            );
+                        }
+                    }
                 }
 
                 clay::set_layout_dimensions(
