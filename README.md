@@ -13,7 +13,8 @@ fwmp shows TCP connections grouped by the application that owns them, with detai
 - Interactive TUI-style interface
 - eBPF-based network observation
 
-
+## Screenshot
+![ui](resources/sc1.png)
 ## Process information
 
 For sockets associated with an application, fwmp can expose:
