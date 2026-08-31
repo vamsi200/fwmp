@@ -543,7 +543,6 @@ struct InspectInformation {
     ushort remote_port;
     char family;
     Protocol protocol;
-    EventType event_type;
     // String hostname;
     // String cname;
     // String Cert;

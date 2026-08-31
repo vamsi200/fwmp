@@ -580,7 +580,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                     .layout = {
                         .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                         .sizing = {
-                            .width = clay::sizing_fixed(160),
+                            .width = clay::sizing_fixed(200),
                             .height = clay::sizing_grow()
                         },
                         .padding = { .left = 14, .right = 14, .top = 4, .bottom = 4 },
@@ -631,7 +631,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                     );
 
                     clay::@text(
-                        clay::@string(is_focused ? ">> " : " "),
+                        clay::@string(is_focused ? ">> " : ""),
                         text_cfg(is_focused ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
                     );
 
@@ -660,7 +660,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                     .layout = {
                         .layout_direction = clay::ClayLayoutDirection.TOP_TO_BOTTOM,
                         .sizing = {
-                            .width = clay::sizing_fixed(500),
+                            .width = clay::sizing_fixed(600),
                             .height = clay::sizing_grow()
                         },
                         .padding = { .left = 14, .right = 14, .top = 4, .bottom = 4 },
@@ -699,7 +699,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                 );
 
                 clay::@text(
-                    clay::@string(is_focused ? ">> " : " "),
+                    clay::@string(is_focused ? ">> " : ""),
                     text_cfg(is_focused ? COLOR_ACTIVE_TX : COLOR_DIM, 20)
                 );
 
@@ -908,12 +908,6 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                                 clay::@text(clay::@string("]"), text_cfg(COLOR_DIM, 20));
                             };
 
-                            inspect_line(
-                                "event_type",
-                                string::tformat("%s", info.event_type),
-                                false
-                            );
-
                             if (info.traffic_stats.sent > 0 || info.traffic_stats.received > 0) {
                                 inspect_line(
                                     "sent",
@@ -1089,6 +1083,8 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
             footer_key("[gg]", "top", 2);
             clay::@text(clay::@string(" "), text_cfg(COLOR_DIM, 18));
             footer_key("[Shift + G]", "end", 3);
+            clay::@text(clay::@string(" "), text_cfg(COLOR_DIM, 18));
+            footer_key("[q]", "quit", 4);
         };
     };
 }
@@ -1197,8 +1193,9 @@ fn void init_ui(NetworkChannel* channel) {
     @pool_init(&channel.libc, 256) {
         rl::init_window(1280, 720, "fwmp");
         g_font = rl::load_font(
-            "/home/vamsi/.local/share/fonts/Iosevka/IosevkaNerdFont-Regular.ttf"
-        );
+            "./resources/FiraCode-Regular.ttf"
+        ); // just for now, later will ship appimage
+
         defer rl::unload_font(g_font);
         g_font.texture.set_filter(rl::RLTextureFilter.BILINEAR);
 
