@@ -7,6 +7,7 @@ import std::collections::map;
 import std::thread::channel;
 import std::time;
 import std::net::os;
+import libc;
 
 const ushort AF_INET  = 2;
 const ushort AF_INET6 = 10;
@@ -185,6 +186,7 @@ struct NetworkChannel {
     NanoDuration fetch_interval;
     HashMap{Application, ulong} app_map;
     HashMap{ulong, Socket} sock_map;
+    HashMap{uint, ProcessInfo} process_map;
     ulong next_app_id;
     NanoDuration retention;
 }
@@ -292,8 +294,7 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             Socket? existing = recv.sock_map.get(ev.sock_cookie);
             if (catch existing) return EVENT_NOT_FOUND_ERROR~;
 
-            existing.state = (ev.event_type
-                == EventType.CLOSE) ? SocketState.CLOSE : get_state(ev.state);
+            existing.state = get_state(ev.state);
             existing.last_seen = clock::now();
             recv.sock_map.set(ev.sock_cookie, existing);
 
@@ -301,13 +302,37 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             return ni;
         }
 
-        ProcessInfo pi = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
+        ProcessInfo? cached = recv.process_map.get((uint)ev.pid);
+        ProcessInfo pi;
+
+        if (catch cached) {
+            pi = linsys::process::info(&recv.libc, (int)ev.pid) ?? { };
+
+            ProcessInfo process_copy = {
+                .process = {
+                    .pid = pi.process.pid,
+                    .ppid = pi.process.ppid,
+                    .name = pi.process.name.copy(&recv.libc),
+                    .state = pi.process.state,
+                },
+                .exe_path = pi.exe_path.copy(&recv.libc),
+                .cmdline = pi.cmdline.copy(&recv.libc),
+                .uid = pi.uid,
+                .gid = pi.gid,
+                .threads = pi.threads,
+                .vm_size = pi.vm_size,
+                .vm_rss = pi.vm_rss,
+            };
+
+            recv.process_map.set((uint)ev.pid, process_copy);
+        } else {
+            pi = cached;
+        }
+
         Application app = {
             .name = pi.process.name.copy(&recv.libc),
             .executable = pi.exe_path.copy(&recv.libc),
         };
-
-        pi.free(&recv.libc);
 
         ulong app_id;
         if (recv.app_map.has_key(app)) {
@@ -323,8 +348,10 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             app.executable.free(&recv.libc);
         }
 
-        Endpoint local  = { .addr = ev.local_addr, .port = ev.local_port };
+        Endpoint local = { .addr = ev.local_addr, .port = ev.local_port };
+
         Endpoint remote = { .addr = ev.remote_addr, .port = ev.remote_port };
+
         SocketIdentity identity = {
             .local = local,
             .remote = remote,
@@ -340,6 +367,7 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
             .pid = (uint)ev.pid,
             .last_seen = clock::now(),
         };
+
         recv.sock_map.set(ev.sock_cookie, new_socket);
 
         ni.event = ev;
@@ -348,68 +376,94 @@ fn NetworkInfo? get_process_info(NetworkChannel* recv) {
     };
 }
 
-// typedef SockAddrPtr = void*;
-// const NI_MAXHOST = 1000;
-// 
-// extern fn CInt getnameinfo(
-//     SockAddrPtr sa,
-//     Socklen_t salen,
-//     ZString host,
-//     Socklen_t hostlen,
-//     ZString serv,
-//     Socklen_t servlen,
-//     CInt flags
-// ) @cname("getnameinfo");
-// 
-// fn SockAddrPtr build_sockaddr(char[] addr_bytes, ushort family) @if(os::SUPPORTS_INET) => @pool() {
-//     if (family == AF_INET) {
-//         SockAddrIn* sa = mem::tnew(SockAddrIn);
-//         *sa = { .sin_family = AF_INET };
-//         mem::copy(&sa.sin_addr, addr_bytes.ptr, 4);
-//         return (SockAddrPtr)sa;
-//     }
-// 
-//     SockAddrIn6* sa6 = mem::tnew(SockAddrIn6);
-//     *sa6 = { .sin6_family = AF_INET6 };
-//     mem::copy(&sa6.sin6_addr, addr_bytes.ptr, 16);
-//     return (SockAddrPtr)sa6;
-// }
-// 
-// fn Socklen_t sockaddr_len(ushort family) {
-//     return family == AF_INET ? SockAddrIn::size : SockAddrIn6::size;
-// }
-// 
-// fn String? nameinfo(char[] addr_bytes, ushort family, LibcAllocator alloc) @if(os::SUPPORTS_INET) {
-//     @pool_init(&alloc, 256) {
-//         char[NI_MAXHOST] host_buf;
-//         SockAddrPtr sa = build_sockaddr(addr_bytes, family);
-//         if (getnameinfo(sa, sockaddr_len(family), (ZString)&host_buf, NI_MAXHOST, null, 0, 0)) {
-//             return NAMEINFO_FAILED~;
-//         }
-//         return ((ZString)&host_buf).str_view();
-//     };
-// }
+typedef SockAddrPtr = void*;
+const NI_MAXHOST = 1000;
+
+extern fn CInt getnameinfo(
+    SockAddrPtr sa,
+    Socklen_t salen,
+    ZString host,
+    Socklen_t hostlen,
+    ZString serv,
+    Socklen_t servlen,
+    CInt flags
+) @cname("getnameinfo");
+
+fn SockAddrPtr build_sockaddr(char[] addr_bytes, ushort family) @if(os::SUPPORTS_INET) => @pool() {
+    if (family == AF_INET) {
+        SockAddrIn* sa = mem::tnew(SockAddrIn);
+        *sa = { .sin_family = AF_INET, .sin_port = 0, .sin_addr = 0, .sin_zero = { } };
+
+        mem::copy(&sa.sin_addr, addr_bytes.ptr, 4);
+        return (SockAddrPtr)sa;
+    }
+
+    SockAddrIn6* sa6 = mem::tnew(SockAddrIn6);
+    *sa6 = {
+        .sin6_family = AF_INET6,
+        .sin6_port = 0,
+        .sin6_flowinfo = 0,
+        .sin6_addr = { },
+        .sin6_scope_id = 0
+    };
+
+    mem::copy(&sa6.sin6_addr, addr_bytes.ptr, 16);
+    return (SockAddrPtr)sa6;
+}
+
+fn Socklen_t sockaddr_len(ushort family) {
+    return family == AF_INET ? SockAddrIn::size : SockAddrIn6::size;
+}
+
+const NI_NAMEREQD = 0x0008;
+
+fn String? nameinfo(char[] addr_bytes, ushort family, LibcAllocator alloc) @if(os::SUPPORTS_INET) {
+    @pool_init(&alloc, 256) {
+        char[NI_MAXHOST] host_buf;
+        SockAddrPtr sa = build_sockaddr(addr_bytes, family);
+        if (getnameinfo(
+            sa,
+            sockaddr_len(family),
+            (ZString)&host_buf,
+            NI_MAXHOST,
+            null,
+            0,
+            NI_NAMEREQD
+        )) {
+            return NAMEINFO_FAILED~;
+        }
+        return ((ZString)&host_buf).copy(&alloc);
+    };
+}
 
 fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* to_remove) {
     Clock start = clock::now();
 
     List{Socket} sockets_list;
     sockets_list.init(&network_channel.libc);
+
     List{TrafficStats} traffic_stats_list;
     traffic_stats_list.init(&network_channel.libc);
+
     List{InspectInformation} inspect_info_list;
     inspect_info_list.init(&network_channel.libc);
 
     to_remove.clear();
 
     for (;;) {
-        if (clock::now() - start >= network_channel.fetch_interval) break;
+        if (clock::now() - start >= network_channel.fetch_interval) {
+            break;
+        }
+
         NetworkInfo? info = get_process_info(network_channel);
-        if (catch info) continue;
+        if (catch info) {
+            continue;
+        }
     }
 
     foreach (sock : network_channel.sock_map.value_iter()) {
         ulong sent = lookup_bytes(network_channel.network_stats.sent, sock.sock_cookie);
+
         ulong recv = lookup_bytes(network_channel.network_stats.recv, sock.sock_cookie);
 
         TrafficStats traffic_stats = {
@@ -418,17 +472,28 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
             .received = recv
         };
 
+        ProcessInfo? process_info = network_channel.process_map.get(sock.pid);
+        if (catch process_info) {
+            continue;
+        }
+
         InspectInformation inspect_info = {
             .remote_addr = sock.identity.remote.addr,
             .local_addr = sock.identity.local.addr,
             .local_port = sock.identity.local.port,
             .remote_port = sock.identity.remote.port,
-            .hostname = "",
-            .cname = "test",
-            .pid = sock.pid,
+            .pid = (int)sock.pid,
             .sock_state = sock.state,
             .traffic_stats = traffic_stats,
-        };
+            .ppid = process_info.process.ppid,
+            .process_name = process_info.process.name,
+            .state = process_info.process.state,
+            .exe_path = process_info.exe_path,
+            .cmdline = process_info.cmdline,
+            .uid = process_info.uid,
+            .family = sock.identity.family,
+            .protocol = (char)sock.identity.protocol,
+            };
 
         sockets_list.push(sock);
         traffic_stats_list.push(traffic_stats);
@@ -457,16 +522,33 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
     if (!@ok(network_channel.snapshot_channel.try_push(ns))) {
         io::printn("failed to send snapshot");
     }
+
+    return;
 }
-// TODO: Update later
+
 struct InspectInformation {
+    // Process Information
+    int pid;
+    int ppid;
+    String process_name;
+    ProcState state;
+    String exe_path;
+    String cmdline;
+    int uid;
+
+    // Event
     char[16] remote_addr;
     char[16] local_addr;
     ushort local_port;
     ushort remote_port;
-    String hostname;
-    String cname;
-    uint pid;
+    char family;
+    char protocol;
+    EventType event_type;
+    ulong timestamp;
+    // String hostname;
+    // String cname;
+    // String Cert;
+    // String resolver;
     SocketState sock_state;
     TrafficStats traffic_stats;
 }
@@ -486,8 +568,4 @@ fn void? snapshot_loop(NetworkChannel* network_channel) {
     for (;;) {
         if (catch collect_network_snapshot(network_channel, &to_remove)) return;
     }
-}
-
-fn InspectInformation fetch_inspect_information(Allocator allocator, Socket* sock) {
-    abort("not impl");
 }
