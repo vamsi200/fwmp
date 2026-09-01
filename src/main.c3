@@ -1430,7 +1430,8 @@ fn void main(String[] args) {
     defer nc.channel.destroy();
     defer nc.snapshot_channel.destroy();
 
-    ZString path   = string::tformat_zstr("%s/fwmp.bpf.o", get_path());
+    ZString path = string::tformat_zstr("%s/fwmp.bpf.o", get_path());
+
     BpfObject* obj = libbpf::bpf_object__open(path);
 
     if (obj == null) {
@@ -1438,9 +1439,56 @@ fn void main(String[] args) {
         return;
     }
 
-    int err = libbpf::bpf_object__load(obj);
+    BpfProgram* accept_old = libbpf::bpf_object__find_program_by_name(obj, "inet_csk_accept_old");
+
+    BpfProgram* accept_new = libbpf::bpf_object__find_program_by_name(obj, "inet_csk_accept_new");
+
+    if (accept_old == null || accept_new == null) {
+        io::printn("failed to find inet_csk_accept variants");
+        libbpf::bpf_object__close(obj);
+        return;
+    }
+
+    Btf* kernel_btf = libbpf::btf__load_vmlinux_btf();
+
+    if (kernel_btf == null) {
+        io::printn("failed to load kernel BTF");
+
+        libbpf::bpf_object__close(obj);
+        return;
+    }
+
+    int proto_accept_arg = libbpf::btf__find_by_name(kernel_btf, "proto_accept_arg");
+
+    bool new_accept_abi = proto_accept_arg >= 0;
+
+    libbpf::btf__free(kernel_btf);
+
+    io::printfn("INFO: inet_csk_accept ABI: %s", new_accept_abi ? "new (proto_accept_arg)" : "old");
+
+    int err = libbpf::bpf_program__set_autoload(accept_old, !new_accept_abi);
+
+    if (err != 0) {
+        io::printfn("failed to configure inet_csk_accept_old autoload: %d", err);
+
+        libbpf::bpf_object__close(obj);
+        return;
+    }
+
+    err = libbpf::bpf_program__set_autoload(accept_new, new_accept_abi);
+
+    if (err != 0) {
+        io::printfn("failed to configure inet_csk_accept_new autoload: %d", err);
+
+        libbpf::bpf_object__close(obj);
+        return;
+    }
+
+    err = libbpf::bpf_object__load(obj);
+
     if (err != 0) {
         io::printfn("failed to load BPF object: %d", err);
+
         libbpf::bpf_object__close(obj);
         return;
     }
@@ -1450,16 +1498,33 @@ fn void main(String[] args) {
     defer links.free();
 
     BpfProgram* prog = null;
-    RingBufContext ring_buf_ctx;
+
 
     while ((prog = libbpf::bpf_object__next_program(obj, prog)) != null) {
         ZString section = libbpf::bpf_program__section_name(prog);
 
         if (section == null) continue;
+
+        BpfProgram* old_check = libbpf::bpf_object__find_program_by_name(
+            obj,
+            "inet_csk_accept_old"
+        );
+
+        BpfProgram* new_check = libbpf::bpf_object__find_program_by_name(
+            obj,
+            "inet_csk_accept_new"
+        );
+
+
+        if (prog == old_check && new_accept_abi) continue;
+        if (prog == new_check && !new_accept_abi) continue;
+
         BpfLink* link = libbpf::bpf_program__attach(prog);
 
         if (link == null) {
-            io::printfn("failed to attach %s", section);
+            ZString name = libbpf::bpf_program__name(prog);
+
+            io::printfn("failed to attach %s (%s)", section, name);
 
             foreach (existing : links) {
                 libbpf::bpf_link__destroy(existing);
@@ -1470,11 +1535,16 @@ fn void main(String[] args) {
         }
 
         links.push(link);
-        io::printfn("INFO: attached %s", section);
+
+        ZString name = libbpf::bpf_program__name(prog);
+
+        io::printfn("INFO: attached %s (%s)", section, name);
     }
 
-    BpfMap* map             = libbpf::bpf_object__find_map_by_name(obj, "events");
+    BpfMap* map = libbpf::bpf_object__find_map_by_name(obj, "events");
+
     BpfMap* sock_bytes_sent = libbpf::bpf_object__find_map_by_name(obj, "sock_bytes_sent");
+
     BpfMap* sock_bytes_recv = libbpf::bpf_object__find_map_by_name(obj, "sock_bytes_recv");
 
     if (map == null || sock_bytes_sent == null || sock_bytes_recv == null) {
@@ -1489,6 +1559,8 @@ fn void main(String[] args) {
     }
 
     int map_fd = libbpf::bpf_map__fd(map);
+
+    RingBufContext ring_buf_ctx;
 
     RingBuffer* rb = libbpf::ring_buffer__new(
         map_fd,
@@ -1520,21 +1592,26 @@ fn void main(String[] args) {
     process_map.init(&libc, 1024);
     defer process_map.free();
 
-
     nc.map_fd = map_fd;
     nc.ring_buf_ctx = &ring_buf_ctx;
     nc.rb = rb;
+
     nc.network_stats.sent = sock_bytes_sent;
     nc.network_stats.recv = sock_bytes_recv;
+
     nc.fetch_interval = set_fetch_interval();
+
     nc.app_map = app_map;
     nc.sock_map = sock_map;
     nc.next_app_id = 0;
+
     nc.retention = set_retention();
     nc.process_map = process_map;
 
     t_3.create((ThreadFn)&init_ui, &nc)!!;
+
     t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;
+
     t_2.create((ThreadFn)&fetch::snapshot_loop, &nc)!!;
 
     t_1.join()!!;
