@@ -112,6 +112,17 @@ Traffic calculation is also performed from eBPF, with transmitted and received b
 - [C3 Compiler](https://c3-lang.org/getting-started/prebuilt-binaries/)
 - Kernel with eBPF support
 
+## Installation 
+ - Download binary from [link](https://github.com/vamsi200/fwmp/releases/)
+ - Make it executable:
+     - ```bash
+       chmod +x fwmp-x86_64.AppImage
+       ```
+  - Run it:
+      ```bash
+      sudo ./fwmp-x86_64.AppImage
+      ```
+
 ## Building
 
 The repository contains a `build.sh` script for building and running fwmp in project root. 
