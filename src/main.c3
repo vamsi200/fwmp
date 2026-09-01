@@ -11,6 +11,7 @@ import std::time;
 import std::math::random;
 import std::collections::map;
 import linsys;
+import libc;
 
 const clay::ClayColor COLOR_BG        = { 6, 8, 10, 255 };
 const clay::ClayColor COLOR_BORDER    = { 28, 58, 38, 255 };
@@ -209,6 +210,20 @@ macro void footer_key(String key, String action, uint index) {
         clay::@text(clay::@string(key), text_cfg(COLOR_TEXT, 20));
         clay::@text(clay::@string(action), text_cfg(COLOR_DIM, 20));
     };
+}
+
+fn String format_bytes(usz bytes) {
+    String[] units = { "B", "KB", "MB", "GB", "TB" };
+
+    float size = (float)bytes;
+    usz unit   = 0;
+
+    while (size >= 1024.0f && unit < units.len - 1) {
+        size /= 1024.0f;
+        unit++;
+    }
+
+    return string::tformat("%.1f %s", size, units[unit]);
 }
 
 fn void layout(NetworkChannel* channel, bool mouse_clicked) {
@@ -779,7 +794,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                                         .height = clay::sizing_fixed(0)
                                     },
                                     .padding = { .top = 4, .bottom = 0 },
-                                    .child_gap = 2,
+                                    .child_gap = 5,
                                 },
                             }
                         ) {
@@ -833,7 +848,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                                         .width = clay::sizing_grow(),
                                         .height = clay::sizing_fixed(0)
                                     },
-                                    .child_gap = 2,
+                                    .child_gap = 5,
                                 },
                             }
                         ) {
@@ -856,7 +871,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                             ) {
                             };
 
-                            inspect_line("pid", string::tformat("%d", info.pid), true);
+                            inspect_line("cookie", string::tformat("%d", info.sock_cookie), true);
                             String remote_addr = string::tformat(
                                 "[%s]:%d",
                                 fetch::convert_ip(tmem, info.family, info.remote_addr),
@@ -909,14 +924,11 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                             };
 
                             if (info.traffic_stats.sent > 0 || info.traffic_stats.received > 0) {
-                                inspect_line(
-                                    "sent",
-                                    string::tformat("%d KB", info.traffic_stats.sent / 1024),
-                                    false
-                                );
+                                inspect_line("sent", format_bytes(info.traffic_stats.sent), false);
+
                                 inspect_line(
                                     "recv",
-                                    string::tformat("%d KB", info.traffic_stats.received / 1024),
+                                    format_bytes(info.traffic_stats.received),
                                     false
                                 );
                             }
@@ -1192,14 +1204,10 @@ fn void on_error(clay::ClayErrorData error_data) {
 fn void init_ui(NetworkChannel* channel) {
     @pool_init(&channel.libc, 256) {
         rl::init_window(1280, 720, "fwmp");
-        g_font = rl::load_font(
-            "./resources/FiraCode-Regular.ttf"
-        ); // just for now, later will ship appimage
+        ZString font_path = string::tformat_zstr("%s/FiraCode-Regular.ttf", get_path());
+        g_font = rl::load_font(font_path);
 
-        defer rl::unload_font(g_font);
         g_font.texture.set_filter(rl::RLTextureFilter.BILINEAR);
-
-        defer rl::close_window();
         rl::set_target_fps(60);
 
         uint mem_size   = clay::min_memory_size();
@@ -1220,6 +1228,7 @@ fn void init_ui(NetworkChannel* channel) {
             @pool() {
                 if (rl::is_key_pressed(rl::RLKeyboardKey.Q)) {
                     quit = true;
+                    channel.quit = true;
                 }
 
                 if (rl::is_key_pressed(rl::RLKeyboardKey.TAB)) {
@@ -1386,6 +1395,9 @@ fn void init_ui(NetworkChannel* channel) {
                 rl::end_drawing();
             };
         }
+
+        rl::unload_font(g_font);
+        rl::close_window();
     };
 }
 
@@ -1397,6 +1409,12 @@ fn NanoDuration set_retention(long retention_secs = 100) {
 fn NanoDuration set_fetch_interval(long tick = 100) {
     Duration d = time::ms(tick);
     return d.to_nano();
+}
+
+fn ZString get_path() {
+    char* data = libc::getenv("FWMP_DATA");
+    if (data == null) return "./resources";
+    return (ZString)data;
 }
 
 fn void main(String[] args) {
@@ -1412,7 +1430,8 @@ fn void main(String[] args) {
     defer nc.channel.destroy();
     defer nc.snapshot_channel.destroy();
 
-    BpfObject* obj = libbpf::bpf_object__open("/home/vamsi/scripts/fwmp/bpf/fwmp.bpf.o");
+    ZString path   = string::tformat_zstr("%s/fwmp.bpf.o", get_path());
+    BpfObject* obj = libbpf::bpf_object__open(path);
 
     if (obj == null) {
         io::printn("failed to open BPF object");
@@ -1437,9 +1456,6 @@ fn void main(String[] args) {
         ZString section = libbpf::bpf_program__section_name(prog);
 
         if (section == null) continue;
-
-        io::printfn("found program: %s", section);
-
         BpfLink* link = libbpf::bpf_program__attach(prog);
 
         if (link == null) {
@@ -1454,7 +1470,7 @@ fn void main(String[] args) {
         }
 
         links.push(link);
-        io::printfn("attached %s", section);
+        io::printfn("INFO: attached %s", section);
     }
 
     BpfMap* map             = libbpf::bpf_object__find_map_by_name(obj, "events");

@@ -189,6 +189,7 @@ struct NetworkChannel {
     HashMap{uint, ProcessInfo} process_map;
     ulong next_app_id;
     NanoDuration retention;
+    bool quit;
 }
 
 fn ulong lookup_bytes(BpfMap* map, ulong cookie) {
@@ -207,7 +208,7 @@ fn void fetch_data_from_ebpf(NetworkChannel* nc) {
         List{ulong} live_cookies;
         live_cookies.init(tmem);
 
-        while (true) {
+        while (true && !nc.quit) {
             int ret = libbpf::ring_buffer__poll(nc.rb, 100);
 
             if (ret < 0) {
@@ -493,6 +494,7 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
             .uid = process_info.uid,
             .family = sock.identity.family,
             .protocol = sock.identity.protocol,
+            .sock_cookie = sock.sock_cookie
             };
 
         sockets_list.push(sock);
@@ -508,7 +510,6 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
     }
 
     foreach (cookie : to_remove) {
-        io::printfn("removing cookie: %d", cookie);
         network_channel.sock_map.remove(cookie);
     }
 
@@ -549,6 +550,7 @@ struct InspectInformation {
     // String resolver;
     SocketState sock_state;
     TrafficStats traffic_stats;
+    ulong sock_cookie;
 }
 
 struct NetworkSnapshot {
@@ -563,7 +565,7 @@ fn void? snapshot_loop(NetworkChannel* network_channel) {
     to_remove.init(&network_channel.libc);
     defer to_remove.free();
 
-    for (;;) {
+    while (true && !network_channel.quit) {
         if (catch collect_network_snapshot(network_channel, &to_remove)) return;
     }
 }
