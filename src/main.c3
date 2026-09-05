@@ -12,6 +12,7 @@ import std::math::random;
 import std::collections::map;
 import linsys;
 import libc;
+import libpcap;
 
 const clay::ClayColor COLOR_BG        = { 6, 8, 10, 255 };
 const clay::ClayColor COLOR_BORDER    = { 28, 58, 38, 255 };
@@ -878,6 +879,7 @@ fn void layout(NetworkChannel* channel, bool mouse_clicked) {
                                 info.remote_port
                             );
                             inspect_line("remote", remote_addr, true);
+                            inspect_line("hostname", info.hostname, true);
 
                             String local_addr = string::tformat(
                                 "[%s]:%d",
@@ -1229,6 +1231,7 @@ fn void init_ui(NetworkChannel* channel) {
                 if (rl::is_key_pressed(rl::RLKeyboardKey.Q)) {
                     quit = true;
                     channel.quit = true;
+                    break;
                 }
 
                 if (rl::is_key_pressed(rl::RLKeyboardKey.TAB)) {
@@ -1418,7 +1421,17 @@ fn ZString get_path() {
 }
 
 fn void main(String[] args) {
-    Thread t_1, t_2, t_3;
+    CChar[10240] errbuf;
+    Pcap_t* pcap = pcap::pcap_open_live("enp4s0", 65535, 1, 1000, &errbuf[0]);
+    Bpf_program bpf;
+
+    int res = pcap::pcap_compile(pcap, &bpf, "tcp port 443", 1, 0);
+    if (res == -1) return;
+
+    CInt ret = pcap::pcap_setfilter(pcap, &bpf);
+    if (ret == -1) return;
+
+    Thread t_1, t_2, t_3, t_4;
 
     NetworkChannel nc = { };
     LibcAllocator libc;
@@ -1440,7 +1453,6 @@ fn void main(String[] args) {
     }
 
     BpfProgram* accept_old = libbpf::bpf_object__find_program_by_name(obj, "inet_csk_accept_old");
-
     BpfProgram* accept_new = libbpf::bpf_object__find_program_by_name(obj, "inet_csk_accept_new");
 
     if (accept_old == null || accept_new == null) {
@@ -1449,46 +1461,38 @@ fn void main(String[] args) {
         return;
     }
 
-    Btf* kernel_btf = libbpf::btf__load_vmlinux_btf();
+    Btf* kernel_btf = btf::btf__load_vmlinux_btf();
 
     if (kernel_btf == null) {
         io::printn("failed to load kernel BTF");
-
         libbpf::bpf_object__close(obj);
         return;
     }
 
-    int proto_accept_arg = libbpf::btf__find_by_name(kernel_btf, "proto_accept_arg");
+    int proto_accept_arg = btf::btf__find_by_name(kernel_btf, "proto_accept_arg");
+    bool new_accept_abi  = proto_accept_arg >= 0;
 
-    bool new_accept_abi = proto_accept_arg >= 0;
-
-    libbpf::btf__free(kernel_btf);
+    btf::btf__free(kernel_btf);
 
     io::printfn("INFO: inet_csk_accept ABI: %s", new_accept_abi ? "new (proto_accept_arg)" : "old");
 
     int err = libbpf::bpf_program__set_autoload(accept_old, !new_accept_abi);
-
     if (err != 0) {
         io::printfn("failed to configure inet_csk_accept_old autoload: %d", err);
-
         libbpf::bpf_object__close(obj);
         return;
     }
 
     err = libbpf::bpf_program__set_autoload(accept_new, new_accept_abi);
-
     if (err != 0) {
         io::printfn("failed to configure inet_csk_accept_new autoload: %d", err);
-
         libbpf::bpf_object__close(obj);
         return;
     }
 
     err = libbpf::bpf_object__load(obj);
-
     if (err != 0) {
         io::printfn("failed to load BPF object: %d", err);
-
         libbpf::bpf_object__close(obj);
         return;
     }
@@ -1499,22 +1503,18 @@ fn void main(String[] args) {
 
     BpfProgram* prog = null;
 
-
     while ((prog = libbpf::bpf_object__next_program(obj, prog)) != null) {
         ZString section = libbpf::bpf_program__section_name(prog);
-
         if (section == null) continue;
 
         BpfProgram* old_check = libbpf::bpf_object__find_program_by_name(
             obj,
             "inet_csk_accept_old"
         );
-
         BpfProgram* new_check = libbpf::bpf_object__find_program_by_name(
             obj,
             "inet_csk_accept_new"
         );
-
 
         if (prog == old_check && new_accept_abi) continue;
         if (prog == new_check && !new_accept_abi) continue;
@@ -1523,7 +1523,6 @@ fn void main(String[] args) {
 
         if (link == null) {
             ZString name = libbpf::bpf_program__name(prog);
-
             io::printfn("failed to attach %s (%s)", section, name);
 
             foreach (existing : links) {
@@ -1537,14 +1536,11 @@ fn void main(String[] args) {
         links.push(link);
 
         ZString name = libbpf::bpf_program__name(prog);
-
         io::printfn("INFO: attached %s (%s)", section, name);
     }
 
-    BpfMap* map = libbpf::bpf_object__find_map_by_name(obj, "events");
-
+    BpfMap* map             = libbpf::bpf_object__find_map_by_name(obj, "events");
     BpfMap* sock_bytes_sent = libbpf::bpf_object__find_map_by_name(obj, "sock_bytes_sent");
-
     BpfMap* sock_bytes_recv = libbpf::bpf_object__find_map_by_name(obj, "sock_bytes_recv");
 
     if (map == null || sock_bytes_sent == null || sock_bytes_recv == null) {
@@ -1608,15 +1604,31 @@ fn void main(String[] args) {
     nc.retention = set_retention();
     nc.process_map = process_map;
 
+    HashMap{char[4], String} sni_cache;
+    sni_cache.init(&libc, 1024);
+    defer sni_cache.free();
+    nc.sni_cache = sni_cache;
+
+    BufferedChannel{HostnameEvent}* hostname_channel = channel::create_buffered(&libc, 1024)!!;
+    defer hostname_channel.destroy();
+    nc.hostname_channel = hostname_channel;
+
+    LibcAllocator hostname_alloc;
+    HostnameArgs hostname_args;
+    hostname_args.libc = hostname_alloc;
+    hostname_args.pcap = pcap;
+    hostname_args.hostname_channel = hostname_channel;
+    hostname_args.quit = &nc.quit;
+
+    t_4.create((ThreadFn)&fetch::fetch_hostname, &hostname_args)!!;
     t_3.create((ThreadFn)&init_ui, &nc)!!;
-
     t_1.create((ThreadFn)&fetch::fetch_data_from_ebpf, &nc)!!;
-
     t_2.create((ThreadFn)&fetch::snapshot_loop, &nc)!!;
 
+    t_4.join()!!;
+    t_3.join()!!;
     t_1.join()!!;
     t_2.join()!!;
-    t_3.join()!!;
 
     foreach (link : links) {
         libbpf::bpf_link__destroy(link);

@@ -8,6 +8,7 @@ import std::thread::channel;
 import std::time;
 import std::net::os;
 import libc;
+import libpcap;
 
 const ushort AF_INET  = 2;
 const ushort AF_INET6 = 10;
@@ -175,10 +176,16 @@ fn int ringbuf_callback(void* ctx, void* data, usz size) {
     return 0;
 }
 
+struct HostnameEvent {
+    char[4] ip;
+    String hostname;
+}
+
 struct NetworkChannel {
     LibcAllocator libc;
     BufferedChannel{Event}* channel;
     BufferedChannel{NetworkSnapshot}* snapshot_channel;
+    BufferedChannel{HostnameEvent}* hostname_channel;
     int map_fd;
     RingBufContext* ring_buf_ctx;
     RingBuffer* rb;
@@ -187,6 +194,7 @@ struct NetworkChannel {
     HashMap{Application, ulong} app_map;
     HashMap{ulong, Socket} sock_map;
     HashMap{uint, ProcessInfo} process_map;
+    HashMap{char[4], String} sni_cache;
     ulong next_app_id;
     NanoDuration retention;
     bool quit;
@@ -249,7 +257,8 @@ fn void fetch_data_from_ebpf(NetworkChannel* nc) {
     };
 }
 
-faultdef EVENT_NOT_FOUND_ERROR, EXISTING_SOCKET, NO_PTR_RECORD_ERROR, NAMEINFO_FAILED;
+faultdef EVENT_NOT_FOUND_ERROR, EXISTING_SOCKET, NO_PTR_RECORD_ERROR, NAMEINFO_FAILED, NOT_TLS_ERROR, NOT_CLIENT_HELLO_ERROR, MALFORMED_ERROR, NO_SNI_FOUND_ERROR;
+
 
 struct NetworkInfo {
     Event event;
@@ -452,6 +461,12 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
     to_remove.clear();
 
     for (;;) {
+        HostnameEvent? he = network_channel.hostname_channel.try_pop();
+        if (catch he) break;
+        network_channel.sni_cache.set(he.ip, he.hostname);
+    }
+
+    for (;;) {
         if (clock::now() - start >= network_channel.fetch_interval) {
             break;
         }
@@ -478,6 +493,9 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
             continue;
         }
 
+        String? host_lookup = network_channel.sni_cache.get(sock.identity.remote.addr[..3]);
+        String hostname     = host_lookup ?? "";
+
         InspectInformation inspect_info = {
             .remote_addr = sock.identity.remote.addr,
             .local_addr = sock.identity.local.addr,
@@ -488,6 +506,7 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
             .traffic_stats = traffic_stats,
             .ppid = process_info.process.ppid,
             .process_name = process_info.process.name,
+            .hostname = hostname,
             .state = process_info.process.state,
             .exe_path = process_info.exe_path,
             .cmdline = process_info.cmdline,
@@ -499,6 +518,8 @@ fn void? collect_network_snapshot(NetworkChannel* network_channel, List{ulong}* 
 
         sockets_list.push(sock);
         traffic_stats_list.push(traffic_stats);
+
+
         inspect_info_list.push(inspect_info);
     }
 
@@ -544,7 +565,7 @@ struct InspectInformation {
     ushort remote_port;
     char family;
     Protocol protocol;
-    // String hostname;
+    String hostname;
     // String cname;
     // String Cert;
     // String resolver;
@@ -567,5 +588,127 @@ fn void? snapshot_loop(NetworkChannel* network_channel) {
 
     while (true && !network_channel.quit) {
         if (catch collect_network_snapshot(network_channel, &to_remove)) return;
+    }
+}
+
+fn ushort bswap16(ushort v) {
+    return (ushort)(((v & 0xFF) << 8) | ((v >> 8) & 0xFF));
+}
+
+// TLS record header (5 bytes)
+//   content_type   = 0x16 (handshake)
+//   version        (2 bytes, ignore)
+//   length         (2 bytes)
+// Handshake header (4 bytes)
+//   msg_type       = 0x01 (ClientHello)
+//   length         (3 bytes)
+// ClientHello body
+//   version (2) + random (32) + session_id_len (1) + session_id (var)
+//   + cipher_suites_len (2) + cipher_suites (var)
+//   + compression_methods_len (1) + compression_methods (var)
+//   + extensions_len (2)
+//   extensions[]:
+//     ext_type (2) + ext_len (2) + ext_data (var)
+//     if ext_type == 0x0000 (server_name)
+//       inside: server_name_list_len (2) + entry_type (1, 0x00=hostname)
+//               + hostname_len (2) + hostname bytes
+
+fn String? extract_sni(Allocator alloc, char[] tcp_payload) {
+    if (tcp_payload.len < 9) return NOT_TLS_ERROR~;
+    if (tcp_payload[0] != 0x16) return NOT_TLS_ERROR~; // not a handshake record
+    if (tcp_payload[5] != 0x01) return NOT_CLIENT_HELLO_ERROR~; // not ClientHello
+
+    uint pos = 5 + 4; // skip record header (5) + handshake header (4)
+    if ((long)pos + 34 > tcp_payload.len) return MALFORMED_ERROR~;
+    pos += 2 + 32; // client_version(2) + random(32)
+
+    char session_id_len = tcp_payload[pos];
+    pos += 1 + (uint)session_id_len;
+    if ((long)pos + 2 > tcp_payload.len) return MALFORMED_ERROR~;
+
+    ushort cipher_suites_len = bswap16(*(ushort*)&tcp_payload[pos]);
+    pos += 2 + (uint)cipher_suites_len;
+    if ((long)pos + 1 > tcp_payload.len) return MALFORMED_ERROR~;
+
+    char compression_len = tcp_payload[pos];
+    pos += 1 + (uint)compression_len;
+    if ((long)pos + 2 > tcp_payload.len) return MALFORMED_ERROR~;
+
+    ushort ext_total_len = bswap16(*(ushort*)&tcp_payload[pos]);
+    pos += 2;
+    uint ext_end = pos + (uint)ext_total_len;
+    if (ext_end > tcp_payload.len) return MALFORMED_ERROR~;
+
+    while (pos + 4 <= ext_end) {
+        ushort ext_type = bswap16(*(ushort*)&tcp_payload[pos]);
+        ushort ext_len  = bswap16(*(ushort*)&tcp_payload[pos + 2]);
+        pos += 4;
+        if (pos + ext_len > ext_end) return MALFORMED_ERROR~;
+
+        if (ext_type == 0x0000) {
+            uint sni_pos = pos + 2 + 1; // skip list_len(2) + entry_type(1)
+            if (sni_pos + 2 > pos + ext_len) return MALFORMED_ERROR~;
+            ushort host_len = ((ushort)tcp_payload[sni_pos] << 8)
+                | (ushort)tcp_payload[sni_pos + 1];
+            sni_pos += 2;
+            if (sni_pos + host_len > pos + ext_len) return MALFORMED_ERROR~;
+
+            String sni_view = (String)tcp_payload[sni_pos..sni_pos + host_len - 1];
+            return sni_view;
+        }
+        pos += ext_len;
+    }
+
+    return NO_SNI_FOUND_ERROR~;
+}
+
+struct HostnameArgs {
+    Pcap_t* pcap;
+    LibcAllocator libc;
+    BufferedChannel{HostnameEvent}* hostname_channel;
+    bool* quit;
+}
+
+fn void fetch_hostname(HostnameArgs* hostname_args) {
+    Pcap_t* pcap = hostname_args.pcap;
+    while (!*hostname_args.quit) {
+        char* data;
+        Pcap_pkthdr* header;
+        CInt out = pcap::pcap_next_ex(pcap, &header, &data);
+        if (out == 0) continue;
+        if (out == -1) {
+            io::printfn("capture error: %s", pcap::pcap_geterr(pcap));
+            continue;
+        }
+
+        char[] frame = data[:(usz)header.caplen];
+        if (frame.len < 14) continue;
+        char[] ip_pkt = frame[14..];
+        if (ip_pkt.len < 20) continue;
+
+        // high nibble is ip version and lower is internet header length
+        char ihl        = ip_pkt[0] & 0x0F;
+        uint ip_hdr_len = (uint)ihl * 4;
+        if (ip_pkt.len < ip_hdr_len) continue;
+        char protocol = ip_pkt[9];
+
+        char[] l4_payload = ip_pkt[ip_hdr_len..];
+
+        if (protocol == 6) {
+            char data_offset = (l4_payload[12] >> 4) & 0x0F;
+            uint tcp_hdr_len = (uint)data_offset * 4;
+            if (l4_payload.len < tcp_hdr_len) continue;
+            char[] tcp_payload = l4_payload[tcp_hdr_len..];
+
+            String? sni = extract_sni(tmem, tcp_payload);
+            if (catch sni) continue;
+
+            char[4] dst_ip;
+            mem::copy(&dst_ip, &ip_pkt[16], 4);
+            HostnameEvent he = { .ip = dst_ip, .hostname = sni.copy(&hostname_args.libc) };
+            if (!@ok(hostname_args.hostname_channel.try_push(he))) {
+                io::printn("failed to send hostname event");
+            }
+        }
     }
 }

@@ -10,13 +10,16 @@
     "lib"
   ],
   // Libraries to use for all targets.
-  "dependencies": [ "libbpf",  "linsys", 
+  "dependencies": [
+    "libpcap",
+    "libbpf",
+    "linsys",
     "clay",
     "raylib6"
   ],
   // Authors, optionally with email.
   "authors": [
-    "John Doe <john.doe@example.com>"
+    "Vamsi V <contact.vamshi99@gmail.com>"
   ],
   // Version using semantic versioning.
   "version": "0.1.0",
